@@ -1,26 +1,30 @@
-# Sesión 1 · Arquitectura (la fábrica construye el producto)
+# Sesión 2 · Observabilidad (la fábrica la agrega y se observa a sí misma)
 
-En esta sesión no programas. Una fábrica de agentes de Claude Code lee la especificación (`spec/`) y construye el
-HR Assistant en `product/`: una API sin estado, un agente con tope de pasos, un modelo simulado y una página web.
-Tú apruebas el plan y compruebas el resultado.
+La fábrica toma el producto de la sesión 1 y le agrega lo necesario para responder «¿qué pasó con la petición X?»:
+`request_id`, log JSON, auditoría, `/metrics` con SLO y trazas en LangSmith. Además, la fábrica **se observa a sí
+misma**: cada herramienta de cada agente queda en una bitácora, y con ella se dibuja el pipeline de la corrida.
 
 | Paso | Quién | Patrón |
 | --- | --- | --- |
-| Plan y ADR | `architect` | Razonamiento: plan y ejecución |
-| Aprobar el plan | Tú | Humano en el lazo |
-| Pruebas antes del código (TDD y BDD) | `qa-unit` | |
-| Código | `developer` | |
-| Verificación y corrección (máximo 2) | El código decide y el agente corrige | Reflexión |
+| Plan | `architect` y tú lo apruebas | Humano en el lazo |
+| Pruebas primero | `qa-unit` | |
+| Código | `observability` | |
+| unit → contract → qa | El código decide; al primer fallo se corrige (máximo 2) | **Flujo**: encadenamiento con compuertas |
+| Revisión contra QA.md | `qa-style` devuelve APROBADO o CAMBIOS (máximo 2 vueltas) | **Flujo**: evaluador-optimizador |
+| Pipeline y reporte | `scripts/pipeline.py` con la bitácora | |
 
-El hook `hooks/permissions.py` hace que cada agente escriba solo en sus carpetas. Por ejemplo, el desarrollador no
-puede tocar las pruebas.
+Hooks: `hooks/permissions.py` (cada agente escribe solo en sus carpetas) y `hooks/activity_log.py`, nuevo, que
+escribe una línea en `output/activity.jsonl` por cada herramienta.
 
-## Preparar (una vez)
+## Preparar
+
+Copia el producto que construiste en la sesión 1.
 
 macOS / Linux:
 
 ```bash
-cd NextGenCode-M4-Agentes/sesion01
+cd NextGenCode-M4-Agentes/sesion02
+cp -R ../sesion01/product product
 uv venv --python 3.12
 uv pip install -r requirements.txt
 uv run python scripts/verify.py
@@ -29,7 +33,8 @@ uv run python scripts/verify.py
 Windows (PowerShell):
 
 ```powershell
-cd NextGenCode-M4-Agentes\sesion01
+cd NextGenCode-M4-Agentes\sesion02
+Copy-Item -Recurse ..\sesion01\product product
 uv venv --python 3.12
 uv pip install -r requirements.txt
 uv run python scripts/verify.py
@@ -41,31 +46,20 @@ La primera vez que abres `claude` en esta carpeta te pregunta **«Do you trust t
 responde que sí. Sin esa confianza, Claude Code ignora los permisos de `.claude/settings.json` y los agentes no pueden
 correr las verificaciones.
 
-```bash
-claude
-```
-
-Dentro de Claude Code escribe `/factory`. La fábrica te muestra el plan y te pregunta si lo apruebas. Al terminar
-deja `output/report.md` con el estado y la bitácora.
+Ejecuta `claude` y, dentro, escribe `/factory`. Al terminar tendrás tres archivos:
+- `output/report.md`: el estado.
+- `output/qa-review.md`: la revisión de QA.
+- `output/pipeline.md`: el diagrama del pipeline. Ábrelo en GitHub o en la vista previa de Markdown de tu editor.
 
 ## Comprobar
 
 ```bash
 uv run python -m verification unit
 uv run python -m verification contract
+uv run python -m verification qa
 cd product
 uv run uvicorn app.main:app
 ```
 
-Abre http://127.0.0.1:8000 y pregunta «¿Quién es EMP-0004?».
-
-## Qué hay en esta carpeta
-
-| Carpeta | Qué es |
-| --- | --- |
-| `spec/` | Qué debe hacer el producto (requisitos, no código) |
-| `.claude/agents/` | Los agentes y sus instrucciones |
-| `.claude/skills/factory/` | El orquestador `/factory` |
-| `hooks/` | Permisos por agente |
-| `verification/` | Pruebas de contrato: el producto visto desde afuera |
-| `product/`, `output/` | Lo que generan los agentes (no se sube a git) |
+Abre http://127.0.0.1:8000. Pregunta algo, copia el `request_id` que muestra la página y búscalo en el log de la
+terminal. Luego abre http://127.0.0.1:8000/metrics.

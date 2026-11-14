@@ -1,44 +1,49 @@
-# Reporte de la fábrica: HR Assistant
+# Reporte de la fábrica: HR Assistant, sesión 2 (observabilidad)
 
 **Estado:** LISTA
 
-**Correcciones:** 0 de 2 (el código pasó las dos verificaciones en el primer intento).
+**Correcciones:** 1 de 2.
+
+**Vueltas de QA:** 1 de 2. La revisión contra `QA.md` salió APROBADO en la primera vuelta.
+
+**Pipeline:** el diagrama de la corrida está en [output/pipeline.md](pipeline.md) (12 pasos).
 
 ## Bitácora
 
-1. **Plan.** El arquitecto escribió `output/plan.md`, tres ADR en `product/doc/adr/` y
-   `product/doc/architecture.md`.
+0. **Preparación.** `product/app/` existe, porque se trabaja de forma incremental sobre el
+   producto de la sesión 1. La bitácora `output/activity.jsonl` quedó vacía para esta corrida.
+1. **Plan.** El arquitecto reescribió `output/plan.md`, agregó los ADR 0004, 0005 y 0006 y
+   actualizó `product/doc/architecture.md`.
 2. **Aprobación humana.** La persona aprobó el plan en el primer intento (0 rechazos).
-3. **Pruebas primero (TDD).**
-   - El agente de pruebas escribió 25 pruebas en `product/tests/`: 9 escenarios Gherkin y
-     16 pruebas unitarias.
-   - El primer intento de verificación terminó con código 127 porque `uv` no estaba instalado.
-     Fue un fallo del entorno, no el rojo esperado.
-   - La persona eligió instalar `uv`. Homebrew empezó a compilarlo desde el código fuente, junto
-     con LLVM y Rust. Lo detuvimos a pedido de la persona y usamos el instalador oficial
-     (`uv` 0.13.7 en `~/.local/bin`).
-   - `verification unit` terminó con código 1: «todavía no existe product/app/». Rojo, como se
-     esperaba.
-4. **Código.** El desarrollador implementó `product/app/` (`config.py`, `directory.py`,
-   `llm.py`, `agent.py`, `main.py` y `static/index.html`), además de `product/data/employees.json`
-   y `product/requirements.txt`.
-5. **Verificación.**
-   - `verification unit`: OK. Pasaron 25 de 25 pruebas, con 97 % de cobertura (el mínimo es
-     80 %).
-   - `verification contract`: OK. Pasaron 9 de 9 pruebas.
+3. **Pruebas primero.** El agente de pruebas agregó 25 pruebas: 9 escenarios Gherkin y 16 pruebas
+   unitarias. `verification unit` terminó con código 2 porque aún no existían `app.clock`,
+   `app.logs`, `app.metrics` ni `app.tracing`. Rojo, como se esperaba.
+4. **Código.** El agente de observabilidad hizo estos cambios:
+   - creó `clock.py`, `logs.py`, `metrics.py`, `tracing.py` y `product/README.md`;
+   - modificó `config.py`, `agent.py`, `main.py`, `static/index.html` y
+     `product/requirements.txt`.
+5. **Encadenamiento con compuertas.**
+   - Primera corrida: unit OK (50 pruebas) y contract OK (13 pruebas). QA falló con pylint en
+     9.67/10, por 6 avisos `E1101 no-member` en `product/tests/test_tracing.py`.
+   - Corrección 1. El orquestador se desvió de `/factory`, que pide relanzar al agente de
+     observabilidad. Ese agente no puede editar pruebas, porque el hook de permisos se lo impide,
+     así que la corrección fue al agente de pruebas, autor del archivo. Movió las listas del doble
+     de LangSmith a una dataclass, sin desactivar avisos y sin cambiar lo que prueban las pruebas.
+   - Segunda corrida: unit OK (50 de 50 pruebas, 97.93 % de cobertura), contract OK (13 de 13
+     pruebas, sesiones 1 y 2) y qa OK (pylint 10.00/10).
+6. **Evaluador-optimizador.** El agente de estilo escribió `output/qa-review.md` con
+   **APROBADO** en la primera línea y sin hallazgos que bloqueen. Dejó dos mejoras opcionales:
+   - el ADR 0006 menciona una interfaz `Tracer`, pero `tracing.py` no la declara como `Protocol`;
+   - `TOOL_RESULT_PREFIX` está repetido en `agent.py` y en `llm.py`.
+7. **Pipeline y reporte.** `scripts/pipeline.py` generó `output/pipeline.md` con 12 pasos.
 
-## Observaciones
-
-- El desarrollador tomó una decisión que el plan no fijaba: las herramientas desconocidas o que
-  fallan no se agregan a `tools_used`. Ninguna prueba cubre este caso.
-- Las pruebas muestran una advertencia de Starlette porque su `TestClient` con `httpx` está
-  obsoleto. La advertencia viene de la librería, no del código del producto.
-
-## Cómo abrir la página
+## Cómo abrir la página, ver el log y las métricas
 
 ```
 cd product
 uv run uvicorn app.main:app
 ```
 
-Después abre http://127.0.0.1:8000
+- Página: http://127.0.0.1:8000. Pregunta algo y copia el «Id de la petición» que muestra.
+- Log: búscalo en la terminal donde corre el servidor. Cada línea JSON trae ese `request_id`.
+- Métricas: http://127.0.0.1:8000/metrics

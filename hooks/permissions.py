@@ -16,6 +16,8 @@ WRITABLE = {
     "architect": ["output/", "product/doc/"],
     "qa-unit": ["product/tests/"],
     "developer": ["product/app/", "product/data/", "product/requirements.txt"],
+    "observability": ["product/app/", "product/requirements.txt", "product/README.md"],
+    "qa-style": ["output/qa-review.md"],
 }
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 

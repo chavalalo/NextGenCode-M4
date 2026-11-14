@@ -1,5 +1,7 @@
 """Pruebas de ``app.agent``: el bucle con tope y el protocolo JSON."""
 
+import contextlib
+
 from app.agent import Agent
 from app.llm import Completion
 
@@ -73,3 +75,50 @@ def test_invalid_json_and_unknown_tool_do_not_break_the_loop(directory):
     assert result.steps == 3
     for later_call in model.calls[1:]:
         assert later_call[-1]["content"].startswith(PREFIX)
+
+
+class RecordingTracer:
+    """Tracer de prueba que anota qué envuelve y deja la función igual."""
+
+    def __init__(self):
+        self.wrapped = []
+
+    def wrap(self, fn, name, run_type):
+        """Anota el tipo de corrida y devuelve la función sin cambios."""
+        self.wrapped.append((name, run_type))
+        return fn
+
+    @contextlib.contextmanager
+    def context(self, request_id):
+        """Contexto vacío: el agente no lo necesita."""
+        yield request_id
+
+
+def test_agent_reports_why_it_stopped_and_the_tool_calls(directory):
+    answered = Agent(
+        model=ScriptedModel([ASK_EMP_0004, '{"answer": "Es Jorge."}']),
+        directory=directory,
+        max_steps=3,
+    ).run(question("¿Quién es EMP-0004?"))
+    capped = Agent(
+        model=ScriptedModel([ASK_EMP_0004]), directory=directory, max_steps=1
+    ).run(question("¿Quién es EMP-0004?"))
+
+    assert answered.stopped == "answer"
+    assert answered.tool_calls == [
+        {"tool": "get_employee", "args": {"employee_id": "EMP-0004"}}
+    ]
+    assert [call["tool"] for call in answered.tool_calls] == answered.tools_used
+    assert capped.stopped == "max_steps"
+
+
+def test_tracer_wraps_the_run_the_model_and_each_tool(directory):
+    tracer = RecordingTracer()
+    model = ScriptedModel([ASK_EMP_0004, '{"answer": "Es Jorge."}'])
+    agent = Agent(model=model, directory=directory, max_steps=3, tracer=tracer)
+
+    result = agent.run(question("¿Quién es EMP-0004?"))
+
+    assert result.answer == "Es Jorge."
+    run_types = {run_type for _, run_type in tracer.wrapped}
+    assert {"chain", "llm", "tool"} <= run_types

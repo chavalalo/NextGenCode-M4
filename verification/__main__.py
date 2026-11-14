@@ -1,9 +1,10 @@
 """Corre una verificación del producto y termina con su código de salida.
 
-Uso: ``uv run python -m verification unit`` o ``uv run python -m verification contract``
+Uso: ``uv run python -m verification unit`` (o ``contract``, o ``qa``)
 
 - ``unit``: las pruebas que escribió qa-unit, con cobertura de 80 % o más.
 - ``contract``: las pruebas de la fábrica contra el producto corriendo.
+- ``qa``: la parte de QA.md que revisa un programa (``verification/qa.py``).
 
 Código 0: pasa. Cualquier otro: falla, y la salida dice por qué.
 """
@@ -18,6 +19,7 @@ PYTEST = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 STEPS = {
     "unit": (PYTEST + ["tests", "--cov=app", "--cov-fail-under=80"], PRODUCT),
     "contract": (PYTEST + ["verification/contract"], ROOT),
+    "qa": ([sys.executable, "-m", "verification.qa"], ROOT),
 }
 
 

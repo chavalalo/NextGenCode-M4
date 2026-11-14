@@ -48,7 +48,8 @@
     const sendButton = document.getElementById("send");
 
     // Agrega una vuelta a la conversación usando solo textContent.
-    function addTurn(kind, text, tools) {
+    // requestId es el id de la petición que la persona puede pasar a soporte.
+    function addTurn(kind, text, tools, requestId) {
       const turn = document.createElement("div");
       turn.className = "turn " + kind;
       const body = document.createElement("div");
@@ -62,6 +63,13 @@
           : "Herramientas usadas: ninguna";
         turn.appendChild(toolsLine);
       }
+      if (requestId) {
+        const idLine = document.createElement("div");
+        idLine.className = "tools";
+        idLine.setAttribute("data-testid", "request-id");
+        idLine.textContent = "Id de la petición: " + requestId;
+        turn.appendChild(idLine);
+      }
       conversation.appendChild(turn);
     }
 
@@ -72,7 +80,9 @@
         body: JSON.stringify({ question: question, history: history })
       });
       if (!response.ok) {
-        throw new Error("status " + response.status);
+        const error = new Error("status " + response.status);
+        error.requestId = response.headers.get("X-Request-ID");
+        throw error;
       }
       return response.json();
     }
@@ -89,12 +99,13 @@
       sendButton.disabled = true;
       try {
         const body = await ask(question);
-        addTurn("assistant", body.answer, body.tools_used || []);
+        addTurn("assistant", body.answer, body.tools_used || [], body.request_id);
         history.push({ role: "user", content: question });
         history.push({ role: "assistant", content: body.answer });
       } catch (error) {
         addTurn("error",
-          "No se pudo obtener una respuesta. Intenta de nuevo en un momento.");
+          "No se pudo obtener una respuesta. Intenta de nuevo en un momento.",
+          undefined, error.requestId);
       } finally {
         sendButton.disabled = false;
         questionInput.focus();

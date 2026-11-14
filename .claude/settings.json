@@ -7,7 +7,8 @@
       "WebSearch"
     ],
     "allow": [
-      "Bash(uv run python -m verification *)"
+      "Bash(uv run python -m verification *)",
+      "Bash(uv run python scripts/pipeline.py)"
     ]
   },
   "hooks": {
@@ -18,6 +19,26 @@
           {
             "type": "command",
             "command": "uv run python \"$CLAUDE_PROJECT_DIR/hooks/permissions.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python \"$CLAUDE_PROJECT_DIR/hooks/activity_log.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python \"$CLAUDE_PROJECT_DIR/hooks/activity_log.py\""
           }
         ]
       }

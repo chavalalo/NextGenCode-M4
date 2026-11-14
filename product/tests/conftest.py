@@ -4,7 +4,10 @@ Ninguna prueba usa red ni servidor: todo pasa por ``create_app()`` y
 ``fastapi.testclient.TestClient``.
 """
 
+import io
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,7 @@ from app.llm import FakeModel  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 DATA_PATH = PRODUCT / "data" / "employees.json"
+START = datetime(2026, 1, 15, 10, 30, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -49,6 +53,65 @@ def make_client(directory):
         chosen = model or FakeModel(directory.departments())
         app = create_app(settings=settings, model=chosen, directory=directory)
         return TestClient(app)
+
+    return _make
+
+
+@pytest.fixture
+def clock():
+    """Reloj fijo en UTC que solo avanza cuando la prueba lo pide."""
+    # Import local: si falta el módulo fallan solo las pruebas que lo usan.
+    from app.clock import FixedClock  # pylint: disable=import-outside-toplevel
+
+    return FixedClock(START)
+
+
+@pytest.fixture
+def log_stream():
+    """Destino del log JSON en memoria, en lugar de la salida estándar."""
+    return io.StringIO()
+
+
+@pytest.fixture
+def read_log(log_stream):
+    """Lee el log escrito hasta ahora como una lista de objetos JSON.
+
+    :return: Función sin argumentos que devuelve un dict por línea
+    :rtype: callable
+    """
+
+    def _read():
+        lines = log_stream.getvalue().splitlines()
+        return [json.loads(line) for line in lines if line.strip()]
+
+    return _read
+
+
+@pytest.fixture
+def make_observed_client(directory, clock, log_stream):
+    """Fábrica de clientes con reloj fijo, log en memoria y trazas apagadas.
+
+    El cliente no relanza las excepciones del servidor, para poder ver el 500.
+
+    :return: Función que recibe variables de entorno y un modelo opcional
+    :rtype: callable
+    """
+
+    # Import local: si falta el módulo fallan solo las pruebas que lo usan.
+    from app.tracing import NoopTracer  # pylint: disable=import-outside-toplevel
+
+    def _make(environ=None, model=None):
+        settings = Settings.from_env(environ or {})
+        chosen = model or FakeModel(directory.departments())
+        app = create_app(
+            settings=settings,
+            model=chosen,
+            directory=directory,
+            clock=clock,
+            log_stream=log_stream,
+            tracer=NoopTracer(),
+        )
+        return TestClient(app, raise_server_exceptions=False)
 
     return _make
 
