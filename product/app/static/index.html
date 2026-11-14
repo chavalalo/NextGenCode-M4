@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HR Assistant</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0 auto;
+      max-width: 720px;
+      padding: 1rem;
+      color: #222;
+    }
+    h1 { font-size: 1.4rem; }
+    #conversation {
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      min-height: 200px;
+      padding: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .turn { margin: 0.5rem 0; padding: 0.5rem; border-radius: 4px; }
+    .user { background: #eef3fb; }
+    .assistant { background: #f4f4f4; }
+    .error { background: #fdecea; color: #8a1c1c; }
+    .tools { font-size: 0.85rem; color: #555; margin-top: 0.25rem; }
+    form { display: flex; gap: 0.5rem; }
+    input { flex: 1; padding: 0.5rem; }
+    button { padding: 0.5rem 1rem; }
+  </style>
+</head>
+<body>
+  <h1>HR Assistant</h1>
+  <div id="conversation" data-testid="answer" aria-live="polite"></div>
+  <form id="ask-form">
+    <input id="question" data-testid="question" type="text"
+           placeholder="Pregunta por un empleado (EMP-0001) o un departamento"
+           autocomplete="off">
+    <button id="send" data-testid="send" type="submit">Enviar</button>
+  </form>
+  <script>
+    // El historial vive solo en el navegador; el servidor no guarda nada.
+    const history = [];
+    const conversation = document.getElementById("conversation");
+    const form = document.getElementById("ask-form");
+    const questionInput = document.getElementById("question");
+    const sendButton = document.getElementById("send");
+
+    // Agrega una vuelta a la conversación usando solo textContent.
+    function addTurn(kind, text, tools) {
+      const turn = document.createElement("div");
+      turn.className = "turn " + kind;
+      const body = document.createElement("div");
+      body.textContent = text;
+      turn.appendChild(body);
+      if (tools !== undefined) {
+        const toolsLine = document.createElement("div");
+        toolsLine.className = "tools";
+        toolsLine.textContent = tools.length
+          ? "Herramientas usadas: " + tools.join(", ")
+          : "Herramientas usadas: ninguna";
+        turn.appendChild(toolsLine);
+      }
+      conversation.appendChild(turn);
+    }
+
+    async function ask(question) {
+      const response = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: question, history: history })
+      });
+      if (!response.ok) {
+        throw new Error("status " + response.status);
+      }
+      return response.json();
+    }
+
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      const question = questionInput.value.trim();
+      if (!question) {
+        addTurn("error", "Escribe una pregunta antes de enviar.");
+        return;
+      }
+      addTurn("user", question);
+      questionInput.value = "";
+      sendButton.disabled = true;
+      try {
+        const body = await ask(question);
+        addTurn("assistant", body.answer, body.tools_used || []);
+        history.push({ role: "user", content: question });
+        history.push({ role: "assistant", content: body.answer });
+      } catch (error) {
+        addTurn("error",
+          "No se pudo obtener una respuesta. Intenta de nuevo en un momento.");
+      } finally {
+        sendButton.disabled = false;
+        questionInput.focus();
+      }
+    });
+  </script>
+</body>
+</html>
