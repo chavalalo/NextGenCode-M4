@@ -122,3 +122,35 @@ def test_tracer_wraps_the_run_the_model_and_each_tool(directory):
     assert result.answer == "Es Jorge."
     run_types = {run_type for _, run_type in tracer.wrapped}
     assert {"chain", "llm", "tool"} <= run_types
+
+
+class CachedSecondCallModel(ScriptedModel):
+    """Modelo de guion cuya segunda respuesta viene de la caché del gateway."""
+
+    def complete(self, messages):
+        """Marca como cacheada la segunda llamada."""
+        completion = super().complete(messages)
+        if len(self.calls) == 2:
+            return Completion(
+                text=completion.text,
+                input_tokens=completion.input_tokens,
+                output_tokens=completion.output_tokens,
+                cached=True,
+            )
+        return completion
+
+
+def test_run_uses_the_given_model_for_every_step_and_counts_cached_calls(
+    directory,
+):
+    default_model = ScriptedModel([])
+    chosen = CachedSecondCallModel([ASK_EMP_0004, '{"answer": "Es Jorge."}'])
+    agent = Agent(model=default_model, directory=directory, max_steps=3)
+
+    result = agent.run(question("¿Quién es EMP-0004?"), model=chosen)
+
+    assert result.answer == "Es Jorge."
+    assert len(default_model.calls) == 0
+    assert len(chosen.calls) == 2
+    assert [completion.cached for completion in result.completions] == [False, True]
+    assert result.cached_calls == 1

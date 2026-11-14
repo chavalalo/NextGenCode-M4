@@ -1,10 +1,10 @@
-# Fábrica del HR Assistant (Módulo 4, sesión 2)
+# Fábrica del HR Assistant (Módulo 4, sesión 3)
 
 Los agentes construyen el producto en `product/` a partir de la especificación de `spec/`. Las personas dirigen,
 aprueban y comprueban: no programan.
 
 - `/factory` corre la fábrica completa.
-- `.claude/agents/`: architect, qa-unit, developer, observability, qa-style.
+- `.claude/agents/`: architect, qa-unit, developer, observability, qa-style, costs, qa-e2e.
 - `hooks/permissions.py`: cada agente escribe solo en sus carpetas.
 - `hooks/activity_log.py`: bitácora de cada herramienta; `scripts/pipeline.py` dibuja el pipeline.
 - `verification/`: el código decide si un paso terminó bien, no el agente.

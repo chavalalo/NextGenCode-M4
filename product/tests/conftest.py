@@ -116,6 +116,55 @@ def make_observed_client(directory, clock, log_stream):
     return _make
 
 
+GATEWAY_ENVIRON = {
+    "MODEL_PROVIDER": "gateway",
+    "CF_ACCOUNT_ID": "acc-123",
+    "CF_GATEWAY_ID": "hr-gw",
+    "CF_API_TOKEN": "tok-secret",
+}
+
+
+@pytest.fixture
+def gateway_environ():
+    """Variables de entorno de un gateway falso: cuenta, gateway y token de prueba.
+
+    :return: Copia nueva de las variables para que cada prueba la amplíe
+    :rtype: dict
+    """
+    return dict(GATEWAY_ENVIRON)
+
+
+@pytest.fixture
+def make_cost_client(directory, clock, log_stream):
+    """Fábrica de clientes que construyen sus propios modelos y precios.
+
+    No inyecta un único ``model``: ``create_app`` arma ``MODEL_SMALL`` y
+    ``MODEL_LARGE`` (simulados o de gateway) salvo que la prueba pase ``models``.
+    El ``http_client`` permite simular AI Gateway sin red.
+
+    :return: Función que recibe variables de entorno, modelos y cliente HTTP
+    :rtype: callable
+    """
+
+    # Import local: si falta el módulo fallan solo las pruebas que lo usan.
+    from app.tracing import NoopTracer  # pylint: disable=import-outside-toplevel
+
+    def _make(environ=None, models=None, http_client=None):
+        settings = Settings.from_env(environ or {})
+        app = create_app(
+            settings=settings,
+            directory=directory,
+            models=models,
+            http_client=http_client,
+            clock=clock,
+            log_stream=log_stream,
+            tracer=NoopTracer(),
+        )
+        return TestClient(app, raise_server_exceptions=False)
+
+    return _make
+
+
 # Pasos Gherkin compartidos por todos los escenarios.
 
 

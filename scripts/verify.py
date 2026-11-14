@@ -16,6 +16,7 @@ CHECKS = {
     "Tests and coverage >= 80%": [
         "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider",
         "--cov=hooks", "--cov=verification", "--cov-fail-under=80",
+        "--cov-config=scripts/coverage.ini",
     ],
     "Pylint": [
         "-m", "pylint", *CODE, "--max-line-length=88", "--fail-under=9.5",

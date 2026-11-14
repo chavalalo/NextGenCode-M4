@@ -2,6 +2,8 @@
 
 import json
 
+from app.config import Settings
+
 PREFIX = "Resultado de la herramienta: "
 
 
@@ -53,3 +55,20 @@ def test_fake_model_counts_words_as_tokens(fake_model):
 
     assert completion.input_tokens == 6
     assert completion.output_tokens == len(completion.text.split())
+
+
+def test_fake_provider_builds_a_small_and_a_large_model_that_answer_alike(
+    directory,
+):
+    # Import local: mientras no exista, solo falla esta prueba.
+    from app.llm import build_models  # pylint: disable=import-outside-toplevel
+
+    settings = Settings.from_env({})
+
+    models = build_models(settings, directory.departments())
+
+    assert set(models) == {settings.model_small, settings.model_large}
+    small = models[settings.model_small].complete([user("¿Quién es EMP-0004?")])
+    large = models[settings.model_large].complete([user("¿Quién es EMP-0004?")])
+    assert small == large
+    assert small.cached is False

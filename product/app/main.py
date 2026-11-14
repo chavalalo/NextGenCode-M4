@@ -21,8 +21,11 @@ from pydantic import BaseModel, Field, field_validator
 from app.agent import Agent
 from app.clock import SystemClock
 from app.config import Settings
+from app.costs import PriceTable
 from app.directory import EmployeeDirectory
-from app.llm import build_model
+from app.gateway import ModelUnavailable
+from app.levers import choose_model, trim_history
+from app.llm import build_models
 from app.logs import JsonLogger
 from app.metrics import Metrics
 from app.tracing import build_tracer
@@ -33,6 +36,8 @@ REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
 AUDIT_ARG_MAX_CHARS = 200
 INTERNAL_ERROR_STATUS = 500
 INTERNAL_ERROR_DETAIL = "internal error"
+MODEL_UNAVAILABLE_STATUS = 502
+MODEL_UNAVAILABLE_DETAIL = "model unavailable"
 
 
 class HistoryMessage(BaseModel):
@@ -63,6 +68,14 @@ class AskResponse(BaseModel):
     :type output_tokens: int
     :param request_id: Id de la petición, para pasarlo a soporte
     :type request_id: str
+    :param model: Modelo que eligió el enrutador
+    :type model: str
+    :param route: Motivo del enrutador
+    :type route: str
+    :param cached_calls: Llamadas respondidas desde la caché del gateway
+    :type cached_calls: int
+    :param cost_usd: Costo de la respuesta en USD
+    :type cost_usd: float
     """
 
     answer: str
@@ -71,12 +84,22 @@ class AskResponse(BaseModel):
     input_tokens: int
     output_tokens: int
     request_id: str
+    model: str
+    route: str
+    cached_calls: int
+    cost_usd: float
 
 
 @dataclass(frozen=True)
-class _Runtime:
+class _Runtime:  # pylint: disable=too-many-instance-attributes
     """Dependencias ya construidas que usan las rutas.
 
+    :param settings: Configuración con las palancas de costo
+    :type settings: app.config.Settings
+    :param models: Modelos por nombre (``MODEL_SMALL`` y ``MODEL_LARGE``)
+    :type models: dict[str, app.llm.LanguageModel]
+    :param prices: Tabla de precios por modelo
+    :type prices: app.costs.PriceTable
     :param agent: Agente que responde las preguntas
     :type agent: app.agent.Agent
     :param tracer: Tracer de la corrida
@@ -91,6 +114,9 @@ class _Runtime:
     :type index_html: str
     """
 
+    settings: Settings
+    models: dict
+    prices: PriceTable
     agent: Agent
     tracer: object
     logger: JsonLogger
@@ -169,10 +195,11 @@ def _audit_args(args):
     }
 
 
-def _log_agent_run(logger, request_id, payload, result):
+def _log_agent_run(logger, request_id, payload, result, usage):
     """Escribe un ``audit`` por herramienta y el ``agent_run`` de la corrida.
 
-    Solo se registran conteos: nunca el texto de la pregunta ni de la respuesta.
+    Solo se registran conteos, modelo y costo: nunca el texto de la pregunta
+    ni de la respuesta.
 
     :param logger: Log JSON
     :type logger: app.logs.JsonLogger
@@ -182,6 +209,9 @@ def _log_agent_run(logger, request_id, payload, result):
     :type payload: pydantic.BaseModel
     :param result: Resultado del agente
     :type result: app.agent.AgentResult
+    :param usage: ``model``, ``route``, ``history_sent``, ``cached_calls`` y
+        ``cost_usd`` de la corrida
+    :type usage: dict
     """
     for call in result.tool_calls:
         logger.emit(
@@ -201,6 +231,54 @@ def _log_agent_run(logger, request_id, payload, result):
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         stopped=result.stopped,
+        **usage,
+    )
+
+
+def _answer(runtime, request_id, payload):
+    """Enruta, recorta el historial, corre el agente y calcula el costo.
+
+    :param runtime: Dependencias ya construidas
+    :type runtime: _Runtime
+    :param request_id: Id de la petición
+    :type request_id: str
+    :param payload: Cuerpo de la petición
+    :type payload: pydantic.BaseModel
+    :return: Respuesta de ``POST /ask``
+    :rtype: AskResponse
+    :raises app.gateway.ModelUnavailable: Si el gateway falla
+    """
+    settings = runtime.settings
+    route = choose_model(payload.question, settings)
+    history = trim_history(
+        [message.model_dump() for message in payload.history],
+        settings.history_window,
+    )
+    messages = history + [{"role": "user", "content": payload.question}]
+    with runtime.tracer.context(request_id):
+        result = runtime.agent.run(messages, model=runtime.models[route.model])
+    cost_usd = runtime.prices.cost(route.model, result.completions)
+    usage = {
+        "model": route.model,
+        "route": route.reason,
+        "history_sent": len(history),
+        "cached_calls": result.cached_calls,
+        "cost_usd": cost_usd,
+    }
+    _log_agent_run(runtime.logger, request_id, payload, result, usage)
+    runtime.metrics.add_tokens(result.input_tokens, result.output_tokens)
+    runtime.metrics.add_cost(cost_usd)
+    return AskResponse(
+        answer=result.answer,
+        steps=result.steps,
+        tools_used=list(result.tools_used),
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        request_id=request_id,
+        model=route.model,
+        route=route.reason,
+        cached_calls=result.cached_calls,
+        cost_usd=cost_usd,
     )
 
 
@@ -268,36 +346,57 @@ def _add_routes(application, runtime):
 
     @application.get("/metrics")
     def metrics():
-        """Devuelve las métricas de este proceso."""
-        return runtime.metrics.snapshot(os.getpid())
+        """Devuelve las métricas de este proceso con el costo acumulado."""
+        snapshot = runtime.metrics.snapshot(os.getpid())
+        snapshot["cost_usd"] = runtime.metrics.cost_usd()
+        return snapshot
 
     @application.post("/ask", response_model=AskResponse)
     def ask(payload: ask_request, request: Request):
         """Responde una pregunta; el historial lo manda el cliente."""
         request_id = request.state.request_id
-        messages = [message.model_dump() for message in payload.history]
-        messages.append({"role": "user", "content": payload.question})
-        with runtime.tracer.context(request_id):
-            result = runtime.agent.run(messages)
-        _log_agent_run(runtime.logger, request_id, payload, result)
-        runtime.metrics.add_tokens(result.input_tokens, result.output_tokens)
-        return AskResponse(
-            answer=result.answer,
-            steps=result.steps,
-            tools_used=list(result.tools_used),
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            request_id=request_id,
-        )
+        try:
+            return _answer(runtime, request_id, payload)
+        except ModelUnavailable as error:
+            # Solo el tipo: nunca la URL (con la cuenta) ni el token.
+            runtime.logger.emit("error", request_id, error_type=type(error).__name__)
+            return JSONResponse(
+                status_code=MODEL_UNAVAILABLE_STATUS,
+                content={"detail": MODEL_UNAVAILABLE_DETAIL, "request_id": request_id},
+            )
 
 
-# Las dependencias de observabilidad se inyectan por nombre para las pruebas.
+def _resolve_models(settings, model, models, build):
+    """Decide qué modelos usa la aplicación.
+
+    :param settings: Configuración con ``MODEL_SMALL`` y ``MODEL_LARGE``
+    :type settings: app.config.Settings
+    :param model: Modelo único inyectado; se usa para ambas rutas
+    :type model: app.llm.LanguageModel or None
+    :param models: Modelos por nombre inyectados
+    :type models: dict or None
+    :param build: Función sin argumentos que construye los modelos
+    :type build: callable
+    :return: Modelos por nombre
+    :rtype: dict[str, app.llm.LanguageModel]
+    """
+    if models is not None:
+        return dict(models)
+    if model is not None:
+        return {settings.model_small: model, settings.model_large: model}
+    return build()
+
+
+# Las dependencias se inyectan por nombre para las pruebas.
 # pylint: disable-next=too-many-arguments
 def create_app(
     settings=None,
     model=None,
     directory=None,
     *,
+    models=None,
+    prices=None,
+    http_client=None,
     clock=None,
     log_stream=None,
     tracer=None,
@@ -306,10 +405,18 @@ def create_app(
 
     :param settings: Configuración; si falta se lee del entorno
     :type settings: app.config.Settings or None
-    :param model: Modelo de lenguaje; si falta se construye según la configuración
+    :param model: Modelo único para ambas rutas; el costo sale del nombre que
+        elige el enrutador
     :type model: app.llm.LanguageModel or None
     :param directory: Directorio de empleados; si falta se carga del archivo
     :type directory: app.directory.EmployeeDirectory or None
+    :param models: Modelos por nombre; si faltan (y no hay ``model``) se
+        construyen según la configuración
+    :type models: dict[str, app.llm.LanguageModel] or None
+    :param prices: Tabla de precios; si falta se carga de ``PRICES_PATH``
+    :type prices: app.costs.PriceTable or None
+    :param http_client: Cliente HTTP para AI Gateway; si falta se crea uno
+    :type http_client: httpx.Client or None
     :param clock: Reloj para el log y la latencia; si falta, el del sistema
     :type clock: app.clock.Clock or None
     :param log_stream: Destino del log JSON; si falta, la salida estándar
@@ -322,12 +429,20 @@ def create_app(
     """
     settings = settings or Settings.from_env(os.environ)
     directory = directory or EmployeeDirectory(settings.employees_path)
-    model = model or build_model(settings, directory.departments())
+    models = _resolve_models(
+        settings,
+        model,
+        models,
+        lambda: build_models(settings, directory.departments(), http_client),
+    )
     clock = clock if clock is not None else SystemClock()
     tracer = tracer if tracer is not None else build_tracer(settings)
     runtime = _Runtime(
+        settings=settings,
+        models=models,
+        prices=prices if prices is not None else PriceTable.load(settings.prices_path),
         agent=Agent(
-            model=model,
+            model=models[settings.model_large],
             directory=directory,
             max_steps=settings.agent_max_steps,
             tracer=tracer,

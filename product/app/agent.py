@@ -14,7 +14,7 @@ STEP_CAP_ANSWER = (
 
 
 @dataclass
-class AgentResult:
+class AgentResult:  # pylint: disable=too-many-instance-attributes
     """Resultado de una ejecución del agente.
 
     :param answer: Respuesta final en español
@@ -31,6 +31,10 @@ class AgentResult:
     :type stopped: str
     :param tool_calls: Herramientas ejecutadas con sus argumentos
     :type tool_calls: list[dict]
+    :param completions: Respuestas del modelo en cada vuelta, para el costo
+    :type completions: list[app.llm.Completion]
+    :param cached_calls: Llamadas que el gateway respondió desde su caché
+    :type cached_calls: int
     """
 
     answer: str
@@ -40,6 +44,8 @@ class AgentResult:
     output_tokens: int = 0
     stopped: str = STOPPED_MAX_STEPS
     tool_calls: list = field(default_factory=list)
+    completions: list = field(default_factory=list)
+    cached_calls: int = 0
 
 
 class Agent:
@@ -58,7 +64,8 @@ class Agent:
 
     def __init__(self, model, directory, max_steps, tracer=None):
         tracer = tracer if tracer is not None else NoopTracer()
-        self._complete = tracer.wrap(model.complete, "model.complete", "llm")
+        self._tracer = tracer
+        self._complete = self._wrap_model(model)
         self._max_steps = max_steps
         self._tools = {
             name: tracer.wrap(tool, name, "tool")
@@ -69,31 +76,50 @@ class Agent:
         }
         self._traced_loop = tracer.wrap(self._loop, "agent.run", "chain")
 
-    def run(self, messages):
+    def _wrap_model(self, model):
+        """Envuelve ``model.complete`` como traza ``llm``.
+
+        :param model: Modelo con el método ``complete(messages)``
+        :type model: app.llm.LanguageModel
+        :return: Función ``complete`` trazada
+        :rtype: callable
+        """
+        return self._tracer.wrap(model.complete, "model.complete", "llm")
+
+    def run(self, messages, model=None):
         """Ejecuta el bucle hasta tener respuesta o llegar al tope.
 
         :param messages: Conversación con ``role`` y ``content``
         :type messages: list[dict]
-        :return: Respuesta, vueltas, herramientas, tokens y motivo de término
+        :param model: Modelo para todas las vueltas de esta pregunta; si falta,
+            el del constructor
+        :type model: app.llm.LanguageModel or None
+        :return: Respuesta, vueltas, herramientas, tokens, llamadas y motivo
         :rtype: AgentResult
         """
-        return self._traced_loop(messages)
+        complete = self._complete if model is None else self._wrap_model(model)
+        return self._traced_loop(messages, complete)
 
-    def _loop(self, messages):
+    def _loop(self, messages, complete):
         """Bucle con tope del agente (la parte que se traza como ``chain``).
 
         :param messages: Conversación con ``role`` y ``content``
         :type messages: list[dict]
-        :return: Respuesta, vueltas, herramientas, tokens y motivo de término
+        :param complete: Función ``complete`` del modelo de esta pregunta
+        :type complete: callable
+        :return: Respuesta, vueltas, herramientas, tokens, llamadas y motivo
         :rtype: AgentResult
         """
         conversation = [dict(message) for message in messages]
         result = AgentResult(answer=STEP_CAP_ANSWER)
         for step in range(1, self._max_steps + 1):
-            completion = self._complete(conversation)
+            completion = complete(conversation)
             result.steps = step
             result.input_tokens += completion.input_tokens
             result.output_tokens += completion.output_tokens
+            result.completions.append(completion)
+            if completion.cached:
+                result.cached_calls += 1
             request = _parse(completion.text)
             if isinstance(request.get("answer"), str):
                 result.answer = request["answer"]

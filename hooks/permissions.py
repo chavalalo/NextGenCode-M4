@@ -18,6 +18,9 @@ WRITABLE = {
     "developer": ["product/app/", "product/data/", "product/requirements.txt"],
     "observability": ["product/app/", "product/requirements.txt", "product/README.md"],
     "qa-style": ["output/qa-review.md"],
+    "costs": ["product/app/", "product/data/", "product/requirements.txt",
+              "product/README.md", "product/.env.example"],
+    "qa-e2e": ["product/e2e/"],
 }
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 

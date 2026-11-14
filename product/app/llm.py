@@ -1,32 +1,27 @@
-"""Interfaz del modelo de lenguaje y modelo simulado determinista."""
+"""Interfaz del modelo de lenguaje, modelo simulado y fábrica de modelos."""
 
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
 from typing import Protocol, Sequence
+
+from app.completion import Completion
+from app.gateway import GatewayModel
+
+__all__ = [
+    "Completion",
+    "FakeModel",
+    "GatewayModel",
+    "LanguageModel",
+    "build_models",
+    "count_words",
+]
 
 TOOL_RESULT_PREFIX = "Resultado de la herramienta: "
 ANSWER_PREFIX = "Según el directorio: "
 HELP_ANSWER = "Pregúntame por un empleado (EMP-0001) o un departamento."
 EMPLOYEE_ID_PATTERN = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class Completion:
-    """Respuesta de un modelo con su conteo de tokens.
-
-    :param text: Texto devuelto por el modelo (un objeto JSON)
-    :type text: str
-    :param input_tokens: Tokens de entrada consumidos
-    :type input_tokens: int
-    :param output_tokens: Tokens de salida generados
-    :type output_tokens: int
-    """
-
-    text: str
-    input_tokens: int
-    output_tokens: int
+FAKE_MODEL_NAME = "fake"
 
 
 class LanguageModel(Protocol):  # pylint: disable=too-few-public-methods
@@ -70,12 +65,18 @@ def count_words(text):
 class FakeModel:
     """Modelo simulado: decide con reglas fijas sobre el último mensaje.
 
+    El nombre solo sirve para cobrarlo con el precio de ese modelo; dos
+    modelos simulados con nombres distintos responden igual.
+
     :param departments: Departamentos que existen en los datos
     :type departments: Sequence[str]
+    :param name: Nombre del modelo, como en la tabla de precios
+    :type name: str
     """
 
-    def __init__(self, departments):
+    def __init__(self, departments, name=FAKE_MODEL_NAME):
         self._departments = tuple(departments)
+        self.name = name
 
     def complete(self, messages):
         """Responde con un objeto JSON según las reglas del modelo simulado.
@@ -132,17 +133,25 @@ class FakeModel:
         return None
 
 
-def build_model(settings, departments):
-    """Construye el modelo indicado en la configuración.
+def build_models(settings, departments, http_client=None):
+    """Construye el modelo barato y el capaz según la configuración.
+
+    Con ``fake`` son dos modelos simulados con los nombres de ``MODEL_SMALL`` y
+    ``MODEL_LARGE``; con ``gateway`` son dos modelos reales de AI Gateway.
 
     :param settings: Configuración de la aplicación
     :type settings: app.config.Settings
     :param departments: Departamentos que existen en los datos
     :type departments: Sequence[str]
-    :return: Modelo listo para usar
-    :rtype: LanguageModel
+    :param http_client: Cliente HTTP para el gateway; si falta se crea uno
+    :type http_client: httpx.Client or None
+    :return: Modelos por nombre
+    :rtype: dict[str, LanguageModel]
     :raises ValueError: Si el proveedor no está soportado
     """
+    names = (settings.model_small, settings.model_large)
     if settings.model_provider == "fake":
-        return FakeModel(departments)
+        return {name: FakeModel(departments, name) for name in names}
+    if settings.model_provider == "gateway":
+        return {name: GatewayModel(name, settings, http_client) for name in names}
     raise ValueError(f"Unsupported model provider: {settings.model_provider}")

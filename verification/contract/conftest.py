@@ -1,40 +1,8 @@
-"""Arranca el producto con el modelo simulado para probarlo por HTTP.
+"""El producto corriendo, para las pruebas de contrato."""
 
-Las pruebas de contrato no importan el código del producto: le hablan como un
-cliente, así que valen sin importar cómo lo haya escrito el agente.
-"""
-
-import os
-import subprocess
-import sys
-import time
-from contextlib import contextmanager
-from pathlib import Path
-
-import httpx
 import pytest
 
-PRODUCT = Path(__file__).resolve().parents[2] / "product"
-
-
-@contextmanager
-def running_product(port: int, **env: str):
-    """Corre ``uvicorn app.main:app`` en ``port`` mientras dure el bloque."""
-    settings = {**os.environ, "MODEL_PROVIDER": "fake", **env}
-    command = [sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(port)]
-    server = subprocess.Popen(command, cwd=PRODUCT, env=settings)
-    url = f"http://127.0.0.1:{port}"
-    try:
-        for _ in range(40):
-            try:
-                httpx.get(f"{url}/health", timeout=1)
-                break
-            except httpx.TransportError:
-                time.sleep(0.25)
-        yield httpx.Client(base_url=url, timeout=10)
-    finally:
-        server.terminate()
-        server.wait(timeout=10)
+from verification.server import running_product
 
 
 @pytest.fixture(scope="session")

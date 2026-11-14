@@ -60,3 +60,51 @@ def test_settings_never_keep_the_langsmith_key():
     assert settings.tracing_enabled is True
     assert secret not in repr(settings)
     assert secret not in [str(value) for value in vars(settings).values()]
+
+
+def test_default_cost_settings_match_the_specification():
+    settings = Settings.from_env({})
+
+    assert settings.cf_account_id == ""
+    assert settings.cf_gateway_id == "default"
+    assert settings.cf_api_token == ""
+    assert settings.model_small == "@cf/meta/llama-3.1-8b-instruct-fast"
+    assert settings.model_large == "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    assert settings.routing is True
+    assert settings.router_max_chars == 80
+    assert settings.history_window == 6
+    assert settings.model_max_tokens == 300
+    assert settings.model_temperature == 0.0
+    assert settings.cache_ttl_seconds == 0
+    expected = (PRODUCT / "data" / "model_prices.json").resolve()
+    assert Path(settings.prices_path).resolve() == expected
+
+
+def test_gateway_without_any_cloudflare_variable_prevents_startup(gateway_environ):
+    for name in ("CF_ACCOUNT_ID", "CF_GATEWAY_ID", "CF_API_TOKEN"):
+        environ = dict(gateway_environ, **{name: ""})
+        with pytest.raises(ConfigError, match=name) as error:
+            Settings.from_env(environ)
+        assert "tok-secret" not in str(error.value)
+
+
+def test_settings_never_show_the_cloudflare_token(gateway_environ):
+    settings = Settings.from_env(gateway_environ)
+
+    assert settings.model_provider == "gateway"
+    assert settings.cf_api_token == "tok-secret"
+    assert "tok-secret" not in repr(settings)
+
+
+def test_invalid_cost_settings_prevent_startup():
+    invalid = {
+        "HISTORY_WINDOW": "-1",
+        "MODEL_TEMPERATURE": "abc",
+        "ROUTER_MAX_CHARS": "0",
+        "ROUTING": "maybe",
+        "MODEL_SMALL": "@cf/unknown/model-without-price",
+    }
+
+    for name, value in invalid.items():
+        with pytest.raises(ConfigError, match=name):
+            Settings.from_env({name: value})

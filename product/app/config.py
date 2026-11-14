@@ -4,12 +4,17 @@ La configuración es inmutable y se valida completa al construirse: un valor
 inválido impide arrancar con un mensaje claro.
 """
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from app.costs import PriceTable
+
 PRODUCT_DIR = Path(__file__).resolve().parents[1]
-SUPPORTED_PROVIDERS = ("fake",)
+SUPPORTED_PROVIDERS = ("fake", "gateway")
+GATEWAY_PROVIDER = "gateway"
+CLOUDFLARE_VARIABLES = ("CF_ACCOUNT_ID", "CF_GATEWAY_ID", "CF_API_TOKEN")
 
 DEFAULT_MODEL_PROVIDER = "fake"
 DEFAULT_AGENT_MAX_STEPS = "3"
@@ -19,6 +24,16 @@ DEFAULT_SERVICE_NAME = "hr-assistant"
 DEFAULT_SLO_P95_MS = "2000"
 DEFAULT_LANGSMITH_TRACING = "false"
 DEFAULT_HIDE_TEXT = "true"
+DEFAULT_CF_GATEWAY_ID = "default"
+DEFAULT_MODEL_SMALL = "@cf/meta/llama-3.1-8b-instruct-fast"
+DEFAULT_MODEL_LARGE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+DEFAULT_ROUTING = "true"
+DEFAULT_ROUTER_MAX_CHARS = "80"
+DEFAULT_HISTORY_WINDOW = "6"
+DEFAULT_MODEL_MAX_TOKENS = "300"
+DEFAULT_MODEL_TEMPERATURE = "0"
+DEFAULT_CACHE_TTL_SECONDS = "0"
+DEFAULT_PRICES_PATH = "data/model_prices.json"
 BOOLEAN_VALUES = {"true": True, "false": False}
 
 
@@ -48,6 +63,73 @@ def _positive_int(environ, name, default):
         ) from error
     if value <= 0:
         raise ConfigError(f"{name} must be greater than 0, got {value}")
+    return value
+
+
+def _non_negative_int(environ, name, default):
+    """Lee una variable de entorno como entero mayor o igual que cero.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :param name: Nombre de la variable
+    :type name: str
+    :param default: Valor por omisión en texto
+    :type default: str
+    :return: El entero leído
+    :rtype: int
+    :raises ConfigError: Si el valor no es un entero mayor o igual que cero
+    """
+    raw = environ.get(name, default)
+    try:
+        value = int(str(raw).strip())
+    except ValueError as error:
+        raise ConfigError(
+            f"{name} must be a non-negative integer, got {raw!r}"
+        ) from error
+    if value < 0:
+        raise ConfigError(f"{name} must be 0 or greater, got {value}")
+    return value
+
+
+def _non_negative_float(environ, name, default):
+    """Lee una variable de entorno como decimal mayor o igual que cero.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :param name: Nombre de la variable
+    :type name: str
+    :param default: Valor por omisión en texto
+    :type default: str
+    :return: El decimal leído
+    :rtype: float
+    :raises ConfigError: Si el valor no es un número mayor o igual que cero
+    """
+    raw = environ.get(name, default)
+    try:
+        value = float(str(raw).strip())
+    except ValueError as error:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from error
+    if math.isnan(value) or value < 0:
+        raise ConfigError(f"{name} must be 0 or greater, got {value}")
+    return value
+
+
+def _non_empty(environ, name, default):
+    """Lee una variable de entorno de texto que no puede quedar vacía.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :param name: Nombre de la variable
+    :type name: str
+    :param default: Valor por omisión
+    :type default: str
+    :return: El texto sin espacios a los lados
+    :rtype: str
+    :raises ConfigError: Si el texto está vacío
+    """
+    value = str(environ.get(name, default)).strip()
+    if not value:
+        raise ConfigError(f"{name} must not be empty")
     return value
 
 
@@ -103,10 +185,32 @@ def _tracing_enabled(environ):
     return requested and has_key
 
 
-def _employees_path(environ):
-    """Resuelve la ruta del archivo de empleados y comprueba que exista.
+def _existing_file(environ, name, default):
+    """Resuelve la ruta de un archivo de datos y comprueba que exista.
 
     Las rutas relativas se resuelven contra la carpeta ``product/``.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :param name: Nombre de la variable
+    :type name: str
+    :param default: Ruta por omisión
+    :type default: str
+    :return: Ruta absoluta al archivo
+    :rtype: pathlib.Path
+    :raises ConfigError: Si el archivo no existe
+    """
+    path = Path(environ.get(name, default))
+    if not path.is_absolute():
+        path = PRODUCT_DIR / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ConfigError(f"{name} does not point to a file: {path}")
+    return path
+
+
+def _employees_path(environ):
+    """Resuelve la ruta del archivo de empleados y comprueba que exista.
 
     :param environ: Variables de entorno
     :type environ: Mapping[str, str]
@@ -114,21 +218,86 @@ def _employees_path(environ):
     :rtype: pathlib.Path
     :raises ConfigError: Si el archivo no existe
     """
-    raw = environ.get("EMPLOYEES_PATH", DEFAULT_EMPLOYEES_PATH)
-    path = Path(raw)
-    if not path.is_absolute():
-        path = PRODUCT_DIR / path
-    path = path.resolve()
-    if not path.is_file():
-        raise ConfigError(f"EMPLOYEES_PATH does not point to a file: {path}")
-    return path
+    return _existing_file(environ, "EMPLOYEES_PATH", DEFAULT_EMPLOYEES_PATH)
+
+
+def _cloudflare_settings(environ, provider):
+    """Lee la cuenta, el gateway y el token de Cloudflare.
+
+    Con ``gateway`` las tres variables son obligatorias. Los mensajes de error
+    solo nombran la variable: nunca muestran su valor.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :param provider: Proveedor del modelo ya validado
+    :type provider: str
+    :return: Campos ``cf_account_id``, ``cf_gateway_id`` y ``cf_api_token``
+    :rtype: dict
+    :raises ConfigError: Si falta una variable y el proveedor es ``gateway``
+    """
+    defaults = {"CF_GATEWAY_ID": DEFAULT_CF_GATEWAY_ID}
+    values = {
+        name: str(environ.get(name, defaults.get(name, ""))).strip()
+        for name in CLOUDFLARE_VARIABLES
+    }
+    if provider == GATEWAY_PROVIDER:
+        for name, value in values.items():
+            if not value:
+                raise ConfigError(f"{name} is required when MODEL_PROVIDER=gateway")
+    return {name.lower(): value for name, value in values.items()}
+
+
+def _model_settings(environ):
+    """Lee los modelos, sus precios y las palancas de costo.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :return: Campos de modelos, palancas y ruta de precios
+    :rtype: dict
+    :raises ConfigError: Si un valor es inválido o un modelo no tiene precio
+    """
+    models = {
+        "MODEL_SMALL": _non_empty(environ, "MODEL_SMALL", DEFAULT_MODEL_SMALL),
+        "MODEL_LARGE": _non_empty(environ, "MODEL_LARGE", DEFAULT_MODEL_LARGE),
+    }
+    prices_path = _existing_file(environ, "PRICES_PATH", DEFAULT_PRICES_PATH)
+    try:
+        prices = PriceTable.load(prices_path)
+    except (OSError, ValueError) as error:
+        raise ConfigError(
+            f"PRICES_PATH is not a valid prices file: {error}"
+        ) from error
+    for name, model in models.items():
+        if model not in prices:
+            raise ConfigError(f"{name} has no price in PRICES_PATH: {model!r}")
+    return {
+        "model_small": models["MODEL_SMALL"],
+        "model_large": models["MODEL_LARGE"],
+        "routing": _boolean(environ, "ROUTING", DEFAULT_ROUTING),
+        "router_max_chars": _positive_int(
+            environ, "ROUTER_MAX_CHARS", DEFAULT_ROUTER_MAX_CHARS
+        ),
+        "history_window": _non_negative_int(
+            environ, "HISTORY_WINDOW", DEFAULT_HISTORY_WINDOW
+        ),
+        "model_max_tokens": _positive_int(
+            environ, "MODEL_MAX_TOKENS", DEFAULT_MODEL_MAX_TOKENS
+        ),
+        "model_temperature": _non_negative_float(
+            environ, "MODEL_TEMPERATURE", DEFAULT_MODEL_TEMPERATURE
+        ),
+        "cache_ttl_seconds": _non_negative_int(
+            environ, "CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECONDS
+        ),
+        "prices_path": prices_path,
+    }
 
 
 @dataclass(frozen=True)
 class Settings:  # pylint: disable=too-many-instance-attributes
     """Configuración inmutable de la aplicación.
 
-    :param model_provider: Proveedor del modelo (solo ``fake``)
+    :param model_provider: Proveedor del modelo (``fake`` o ``gateway``)
     :type model_provider: str
     :param agent_max_steps: Tope de vueltas del bucle del agente
     :type agent_max_steps: int
@@ -146,6 +315,30 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     :type hide_outputs: bool
     :param tracing_enabled: Trazas encendidas (``LANGSMITH_TRACING`` y clave)
     :type tracing_enabled: bool
+    :param cf_account_id: Cuenta de Cloudflare
+    :type cf_account_id: str
+    :param cf_gateway_id: Gateway de AI Gateway
+    :type cf_gateway_id: str
+    :param cf_api_token: Token de Cloudflare (secreto: no sale en ``repr``)
+    :type cf_api_token: str
+    :param model_small: Modelo barato
+    :type model_small: str
+    :param model_large: Modelo capaz
+    :type model_large: str
+    :param routing: Enrutamiento por pregunta encendido
+    :type routing: bool
+    :param router_max_chars: Preguntas más largas van al modelo capaz
+    :type router_max_chars: int
+    :param history_window: Mensajes de historial que se mandan al modelo
+    :type history_window: int
+    :param model_max_tokens: Tope de tokens de salida por llamada
+    :type model_max_tokens: int
+    :param model_temperature: Temperatura del modelo
+    :type model_temperature: float
+    :param cache_ttl_seconds: Vida de la caché del gateway (0: apagada)
+    :type cache_ttl_seconds: int
+    :param prices_path: Ruta absoluta al archivo de precios
+    :type prices_path: pathlib.Path
     """
 
     model_provider: str
@@ -157,6 +350,18 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     hide_inputs: bool = True
     hide_outputs: bool = True
     tracing_enabled: bool = False
+    cf_account_id: str = ""
+    cf_gateway_id: str = DEFAULT_CF_GATEWAY_ID
+    cf_api_token: str = field(default="", repr=False)
+    model_small: str = DEFAULT_MODEL_SMALL
+    model_large: str = DEFAULT_MODEL_LARGE
+    routing: bool = True
+    router_max_chars: int = int(DEFAULT_ROUTER_MAX_CHARS)
+    history_window: int = int(DEFAULT_HISTORY_WINDOW)
+    model_max_tokens: int = int(DEFAULT_MODEL_MAX_TOKENS)
+    model_temperature: float = float(DEFAULT_MODEL_TEMPERATURE)
+    cache_ttl_seconds: int = int(DEFAULT_CACHE_TTL_SECONDS)
+    prices_path: Path = PRODUCT_DIR / DEFAULT_PRICES_PATH
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> "Settings":
@@ -188,4 +393,6 @@ class Settings:  # pylint: disable=too-many-instance-attributes
             hide_inputs=_boolean(environ, "HIDE_INPUTS", DEFAULT_HIDE_TEXT),
             hide_outputs=_boolean(environ, "HIDE_OUTPUTS", DEFAULT_HIDE_TEXT),
             tracing_enabled=_tracing_enabled(environ),
+            **_cloudflare_settings(environ, provider),
+            **_model_settings(environ),
         )
