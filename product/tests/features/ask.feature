@@ -21,7 +21,8 @@ Feature: Ask the HR assistant
     Given the HR assistant is running
     When I ask "¿Quién es EMP-9999?"
     Then the response status is 200
-    And the answer mentions "No existe un empleado con id EMP-9999"
+    And the tools used are "get_employee"
+    And the answer is "No pude verificar la respuesta con el directorio. Intenta de nuevo."
 
   Scenario: Ask something unrelated
     Given the HR assistant is running
@@ -30,6 +31,7 @@ Feature: Ask the HR assistant
     And the answer is "Pregúntame por un empleado (EMP-0001) o un departamento."
     And no tools were used
     And the agent took 1 steps
+    And the model classified the question for the "directory" specialist
 
   Scenario: The step cap stops the loop
     Given the HR assistant is running with a cap of 1 steps
