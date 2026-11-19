@@ -7,6 +7,8 @@ from typing import Protocol, Sequence
 
 from app.completion import Completion
 from app.gateway import GatewayModel
+from app.policies import phrase_pattern
+from app.prompts import POLICY_PROMPT, SUPERVISOR_PROMPT
 
 __all__ = [
     "Completion",
@@ -19,6 +21,7 @@ __all__ = [
 
 TOOL_RESULT_PREFIX = "Resultado de la herramienta: "
 ANSWER_PREFIX = "Según el directorio: "
+POLICY_ANSWER_PREFIX = "Según la política: "
 HELP_ANSWER = "Pregúntame por un empleado (EMP-0001) o un departamento."
 EMPLOYEE_ID_PATTERN = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
 FAKE_MODEL_NAME = "fake"
@@ -51,6 +54,19 @@ def _fold(text):
     ).casefold()
 
 
+def _system_prompt(messages):
+    """Devuelve el prompt de sistema del primer mensaje, si lo hay.
+
+    :param messages: Mensajes con ``role`` y ``content``
+    :type messages: Sequence[dict]
+    :return: Contenido del mensaje ``system`` inicial o ``None``
+    :rtype: str or None
+    """
+    if messages and messages[0].get("role") == "system":
+        return messages[0].get("content")
+    return None
+
+
 def count_words(text):
     """Cuenta palabras separadas por espacios, como aproximación de tokens.
 
@@ -74,12 +90,20 @@ class FakeModel:
     :type name: str
     """
 
-    def __init__(self, departments, name=FAKE_MODEL_NAME):
+    def __init__(self, departments, name=FAKE_MODEL_NAME, policy_keywords=None):
         self._departments = tuple(departments)
         self.name = name
+        self._policy_patterns = tuple(
+            (phrase_pattern(keyword), topic)
+            for keyword, topic in dict(policy_keywords or {}).items()
+        )
 
     def complete(self, messages):
         """Responde con un objeto JSON según las reglas del modelo simulado.
+
+        El papel sale del prompt de sistema del primer mensaje: con
+        ``SUPERVISOR_PROMPT`` clasifica la pregunta; con ``POLICY_PROMPT``
+        responde como especialista de políticas; si no, como el de directorio.
 
         :param messages: Mensajes con ``role`` y ``content``
         :type messages: Sequence[dict]
@@ -87,7 +111,13 @@ class FakeModel:
         :rtype: Completion
         """
         last = str(messages[-1]["content"]) if messages else ""
-        text = json.dumps(self._decide(last), ensure_ascii=False)
+        system = _system_prompt(messages)
+        if system == SUPERVISOR_PROMPT:
+            decision = self._classify(last)
+        else:
+            prefix = POLICY_ANSWER_PREFIX if system == POLICY_PROMPT else ANSWER_PREFIX
+            decision = self._decide(last, prefix)
+        text = json.dumps(decision, ensure_ascii=False)
         input_tokens = sum(count_words(message["content"]) for message in messages)
         return Completion(
             text=text,
@@ -95,16 +125,32 @@ class FakeModel:
             output_tokens=count_words(text),
         )
 
-    def _decide(self, last):
-        """Aplica las cuatro reglas en orden sobre el último mensaje.
+    def _classify(self, last):
+        """Papel de supervisor: ``policy`` si hay palabra clave de política.
+
+        :param last: Pregunta a clasificar
+        :type last: str
+        :return: Especialista elegido
+        :rtype: dict
+        """
+        topic = self._find_policy_topic(last)
+        return {"specialist": "policy" if topic else "directory"}
+
+    def _decide(self, last, prefix=ANSWER_PREFIX):
+        """Aplica las reglas en orden sobre el último mensaje.
+
+        Resultado de herramienta, id de empleado, departamento, palabra clave de
+        una política y, si nada aplica, el texto de ayuda.
 
         :param last: Contenido del último mensaje
         :type last: str
+        :param prefix: Inicio de la respuesta con el resultado de la herramienta
+        :type prefix: str
         :return: Pedido de herramienta o respuesta
         :rtype: dict
         """
         if last.startswith(TOOL_RESULT_PREFIX):
-            return {"answer": ANSWER_PREFIX + last[len(TOOL_RESULT_PREFIX):]}
+            return {"answer": prefix + last[len(TOOL_RESULT_PREFIX):]}
         match = EMPLOYEE_ID_PATTERN.search(last)
         if match:
             employee_id = match.group(0).upper()
@@ -115,7 +161,24 @@ class FakeModel:
                 "tool": "search_by_department",
                 "args": {"department": department},
             }
+        topic = self._find_policy_topic(last)
+        if topic:
+            return {"tool": "search_policy", "args": {"topic": topic}}
         return {"answer": HELP_ANSWER}
+
+    def _find_policy_topic(self, text):
+        """Busca en el texto una palabra clave de política.
+
+        :param text: Texto donde buscar
+        :type text: str
+        :return: Tema de la política o ``None``
+        :rtype: str or None
+        """
+        folded = _fold(text)
+        for pattern, topic in self._policy_patterns:
+            if pattern.search(folded):
+                return topic
+        return None
 
     def _find_department(self, text):
         """Busca en el texto un departamento conocido.
@@ -133,7 +196,7 @@ class FakeModel:
         return None
 
 
-def build_models(settings, departments, http_client=None):
+def build_models(settings, departments, http_client=None, policy_keywords=None):
     """Construye el modelo barato y el capaz según la configuración.
 
     Con ``fake`` son dos modelos simulados con los nombres de ``MODEL_SMALL`` y
@@ -145,13 +208,19 @@ def build_models(settings, departments, http_client=None):
     :type departments: Sequence[str]
     :param http_client: Cliente HTTP para el gateway; si falta se crea uno
     :type http_client: httpx.Client or None
+    :param policy_keywords: Tema por palabra clave de política, para el modelo
+        simulado
+    :type policy_keywords: Mapping[str, str] or None
     :return: Modelos por nombre
     :rtype: dict[str, LanguageModel]
     :raises ValueError: Si el proveedor no está soportado
     """
+    # Punto de conexión (costs): FAKE_UNAVAILABLE_MODELS y reintentos.
     names = (settings.model_small, settings.model_large)
     if settings.model_provider == "fake":
-        return {name: FakeModel(departments, name) for name in names}
+        return {
+            name: FakeModel(departments, name, policy_keywords) for name in names
+        }
     if settings.model_provider == "gateway":
         return {name: GatewayModel(name, settings, http_client) for name in names}
     raise ValueError(f"Unsupported model provider: {settings.model_provider}")

@@ -80,6 +80,25 @@ class EmployeeDirectory:
             return f"No hay empleados en el departamento {department}: []"
         return _to_json(found)
 
+    def has_employee(self, employee_id):
+        """Indica si existe un empleado con ese id (lo usa el revisor).
+
+        :param employee_id: Id del empleado, por ejemplo ``EMP-0004``
+        :type employee_id: str
+        :return: ``True`` si el id está en el directorio
+        :rtype: bool
+        """
+        wanted = str(employee_id).strip().upper()
+        return any(employee["id"].upper() == wanted for employee in self._employees)
+
+    def count(self):
+        """Cuenta los empleados cargados (lo usa ``GET /ready``).
+
+        :return: Número de empleados
+        :rtype: int
+        """
+        return len(self._employees)
+
     def departments(self):
         """Devuelve los departamentos sin repetir y en orden de aparición.
 

@@ -11,6 +11,7 @@ import re
 import httpx
 
 from app.completion import Completion
+from app.prompts import DIRECTORY_PROMPT
 
 GATEWAY_URL = (
     "https://gateway.ai.cloudflare.com/v1/{account}/{gateway}"
@@ -21,16 +22,9 @@ CACHE_TTL_HEADER = "cf-aig-cache-ttl"
 CACHE_STATUS_HEADER = "cf-aig-cache-status"
 CACHE_HIT = "HIT"
 CODE_FENCE_PATTERN = re.compile(r"^```[A-Za-z]*\s*(.*?)\s*```$", re.DOTALL)
-SYSTEM_PROMPT = (
-    "Eres el asistente de Recursos Humanos. Responde siempre con un solo objeto "
-    "JSON y nada más. Para consultar el directorio pide una herramienta: "
-    '{"tool": "get_employee", "args": {"employee_id": "EMP-0004"}} o '
-    '{"tool": "search_by_department", "args": {"department": "Finanzas"}}. '
-    "El resultado llega en un mensaje que empieza con "
-    '"Resultado de la herramienta: ". Cuando tengas la respuesta, contesta '
-    '{"answer": "<respuesta breve en español>"}. No inventes datos: usa solo lo '
-    "que devuelven las herramientas."
-)
+SYSTEM_ROLE = "system"
+# Prompt por omisión: el del especialista de directorio (sesiones 1 a 4).
+SYSTEM_PROMPT = DIRECTORY_PROMPT
 
 
 class ModelUnavailable(RuntimeError):
@@ -116,12 +110,18 @@ class GatewayModel:  # pylint: disable=too-few-public-methods
     def _body(self, messages):
         """Arma el cuerpo con el prompt de sistema primero.
 
+        Si el primer mensaje ya es de ``system`` (supervisor o especialista de
+        políticas), se usa ese en lugar del prompt por omisión.
+
         :param messages: Mensajes con ``role`` y ``content``
         :type messages: Sequence[dict]
         :return: Cuerpo de la petición
         :rtype: dict
         """
-        conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+        has_system = bool(messages) and messages[0]["role"] == SYSTEM_ROLE
+        conversation = (
+            [] if has_system else [{"role": SYSTEM_ROLE, "content": SYSTEM_PROMPT}]
+        )
         conversation.extend(
             {"role": message["role"], "content": message["content"]}
             for message in messages
