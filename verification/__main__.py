@@ -8,6 +8,7 @@ Uso: ``uv run python -m verification <paso>``, con uno de estos pasos:
 - ``e2e``: las pruebas de Playwright que escribió qa-e2e (``verification/e2e.py``).
 - ``evaluate``: costo y calidad contra la línea base (``verification/evaluate.py``).
 - ``production <url>``: la prueba de humo contra Render (``verification.production``).
+- ``load``: carga concurrente contra el producto local (``verification/load.py``, reto).
 
 Código 0: pasa. Cualquier otro: falla, y la salida dice por qué.
 """
@@ -26,6 +27,7 @@ STEPS = {
     "e2e": ([sys.executable, "-m", "verification.e2e"], ROOT),
     "evaluate": ([sys.executable, "-m", "verification.evaluate"], ROOT),
     "production": ([sys.executable, "-m", "verification.production"], ROOT),
+    "load": ([sys.executable, "-m", "verification.load"], ROOT),
 }
 
 

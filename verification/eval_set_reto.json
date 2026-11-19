@@ -1,0 +1,8 @@
+[
+  {"question": "¿Quién es EMP-0004?", "must_include": ["Jorge Díaz"]},
+  {"question": "¿Qué puesto tiene EMP-0005?", "must_include": ["Contadora"]},
+  {"question": "¿Quiénes trabajan en el departamento de Finanzas?", "must_include": ["Sofía Gómez"]},
+  {"question": "¿Cuántos días de vacaciones me tocan?", "must_include": ["12 días hábiles"]},
+  {"question": "¿Cuál es el horario de trabajo?", "must_include": ["9:00"]},
+  {"question": "¿Puedo hacer home office?", "must_include": ["2 días por semana"]}
+]
