@@ -56,6 +56,17 @@ Nada de lo anterior se rompe: las pruebas y contratos de las sesiones 1 a 4 sigu
      pude verificar la respuesta con el directorio. Intenta de nuevo.». Si la persona preguntó por un id que no
      existe, la respuesta puede decirlo (por ejemplo «EMP-0099 no existe»), como en las sesiones anteriores.
      *(Adenda: la primera versión bloqueaba también ese caso y rompía la respuesta de la sesión 1.)*
+   - **Políticas ancladas al texto.** *(Adenda 2, encontrada en producción el 2026-11-19: con el modelo real, a «Soy
+     [EMAIL], ¿cuántos días de vacaciones tengo?» el especialista `policy` no pidió `search_policy` y respondió «5
+     días»; la política dice 12.)* Dos reglas:
+     - Cuando el supervisor elige `policy` por una regla de palabra clave, el especialista recibe **en código** el
+       texto de esa política (el mismo que devolvería `search_policy`) antes de llamar al modelo, como un mensaje que
+       empieza con «Resultado de la herramienta: », y `tools_used` incluye `search_policy`. El modelo ya no decide si
+       consultar la política.
+     - Si la respuesta del especialista `policy` contiene una cifra (secuencia de dígitos) que no aparece en el texto
+       de ninguna política consultada en esa petición, el revisor la reemplaza por el texto de la política consultada.
+       Si no se consultó ninguna política, la reemplaza por «No pude verificar la respuesta con las políticas.
+       Intenta de nuevo.». Cuenta como respuesta bloqueada en `/metrics`.
    - Recorta la respuesta a `MAX_ANSWER_CHARS` caracteres.
 4. **Resiliencia.**
    - El modelo `gateway` reintenta hasta `MODEL_RETRIES` veces ante timeout, `429` o `5xx`, con espera exponencial
