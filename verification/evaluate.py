@@ -63,6 +63,15 @@ def verdict(baseline: dict, levers: dict) -> bool:
     )
 
 
+def no_regression(levers: dict) -> bool:
+    """Reto: el conjunto original se responde completo, como en las sesiones 1 a 4.
+
+    Sin esta regla, una regresión que baja la calidad de la línea base y de las
+    palancas por igual pasaría el veredicto relativo.
+    """
+    return levers["quality"] == 1.0
+
+
 def main() -> int:
     """Mide las configuraciones, imprime la tabla y decide."""
     cases = json.loads(EVAL_SET.read_text(encoding="utf-8"))
@@ -82,7 +91,12 @@ def main() -> int:
             f"{name:9} quality={result['quality']:.0%} "
             f"cost_usd={result['cost_usd']:.6f} input_tokens={result['input_tokens']}"
         )
-    passed = verdict(baseline, levers) and verdict(no_cache, cache)
+    passed = (
+        verdict(baseline, levers)
+        and verdict(no_cache, cache)
+        and no_regression(levers)
+        and no_regression(cache)
+    )
     return 0 if passed else 1
 
 

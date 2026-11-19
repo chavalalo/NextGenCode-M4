@@ -51,8 +51,11 @@ Nada de lo anterior se rompe: las pruebas y contratos de las sesiones 1 a 4 sigu
      `[CARD]` y `[NSS]` antes de que lleguen al modelo, al log o a la traza. La petición sigue.
 3. **Revisor de salida.**
    - Oculta la PII de la respuesta con las mismas reglas.
-   - **Respuesta anclada a los datos.** Si la respuesta menciona un id `EMP-dddd` que no existe en el directorio, la
-     reemplaza por «No pude verificar la respuesta con el directorio. Intenta de nuevo.».
+   - **Respuesta anclada a los datos.** Si la respuesta menciona un id `EMP-dddd` que no existe en el directorio
+     **y que la persona no escribió en su pregunta** (es decir, un id que inventó el modelo), la reemplaza por «No
+     pude verificar la respuesta con el directorio. Intenta de nuevo.». Si la persona preguntó por un id que no
+     existe, la respuesta puede decirlo (por ejemplo «EMP-0099 no existe»), como en las sesiones anteriores.
+     *(Adenda: la primera versión bloqueaba también ese caso y rompía la respuesta de la sesión 1.)*
    - Recorta la respuesta a `MAX_ANSWER_CHARS` caracteres.
 4. **Resiliencia.**
    - El modelo `gateway` reintenta hasta `MODEL_RETRIES` veces ante timeout, `429` o `5xx`, con espera exponencial
