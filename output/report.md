@@ -1,13 +1,17 @@
-# Reporte de la fábrica: HR Assistant, sesión 3 (costos)
+# Reporte de la fábrica: HR Assistant, sesión 4 (producción)
 
 **Estado:** LISTA
+
+**URL pública:** https://hr-assistant-1q29.onrender.com
 
 **Correcciones:** 1 de 2.
 
 **Vueltas de QA:** 1 de 2. La revisión contra `QA.md` salió APROBADO en la primera vuelta.
 
-**Pipeline:** [output/pipeline.md](pipeline.md) tiene 15 pasos. En el diagrama, `costs` (514 s) y `qa-e2e`
-(101 s) salen de la misma verificación roja y se juntan en la siguiente, es decir, trabajaron en
+**Ciclos de triage:** 1 de 2. El dueño fue `persona` (configuración, no código).
+
+**Pipeline:** el diagrama de la corrida está en [output/pipeline.md](pipeline.md) (18 pasos). En el
+diagrama, `security`, `deploy` y `qa-e2e` salen de la misma verificación roja y trabajaron en
 paralelo.
 
 ## Tabla de `evaluate`
@@ -17,74 +21,64 @@ paralelo.
 | Línea base (sin palancas) | 100 % | 0.000918 | 1681 |
 | Con palancas | 100 % | 0.000123 | 1111 |
 
-Con las palancas el costo baja unas 7.5 veces y la calidad no cambia.
-- **Línea base:** todas las preguntas van al modelo grande (`llama-3.3-70b`) con 10 mensajes de
-  historial.
-- **Con palancas:** las preguntas simples van al modelo pequeño (`llama-3.1-8b`) con 6 mensajes de
-  historial.
+La tabla no cambió respecto a la sesión 3: la sesión 4 agrega seguridad y despliegue, no toca las
+palancas de costo. Se usa el modelo simulado, así que solo demuestra el ahorro de costo.
 
-Salvedad: con el modelo simulado la calidad no puede cambiar, porque el simulado solo mira el
-último mensaje. Esta evaluación demuestra el ahorro de costo; la calidad con palancas solo se puede
-medir con el gateway real.
+## Prueba de humo en producción
+
+La persona la corrió en su propia terminal, para que la clave no pasara por el chat:
+
+```
+  [OK] GET /health -> 200 (esperado 200)
+  [OK] POST /ask sin clave -> 401 (esperado 401)
+  [OK] POST /ask con clave -> 200 (esperado 200)
+[OK] production
+```
+
+Por eso esta prueba no aparece en `output/pipeline.md`, que solo registra lo que corre la fábrica.
 
 ## Bitácora
 
-0. **Preparación.** `product/app/` existe, porque se trabaja de forma incremental sobre las
-   sesiones 1 y 2. La bitácora `output/activity.jsonl` quedó vacía para esta corrida.
-1. **Plan.** El arquitecto reescribió `output/plan.md`, agregó los ADR 0007, 0008 y 0009 y
-   actualizó `product/doc/architecture.md`.
-2. **Aprobación humana.** La persona aprobó el plan en el primer intento (0 rechazos).
-3. **Pruebas primero.** `qa-unit` agregó 25 pruebas: 7 escenarios Gherkin y 18 pruebas unitarias.
-   `verification unit` terminó con código 2 porque aún no existían `app.costs`, `app.gateway` ni
-   `app.levers`. Rojo, como se esperaba.
-4. **Especialistas en paralelo.** Se lanzaron en un solo mensaje.
-   - `costs` creó `levers.py`, `costs.py`, `gateway.py` y `completion.py`. Este último no venía en
-     el plan: evita un import circular entre `llm` y `gateway`.
-   - `costs` también modificó `llm.py`, `agent.py`, `config.py`, `metrics.py` y `main.py`, y agregó
-     `product/.env.example` (sin secretos), `product/data/model_prices.json` y el README
-     actualizado.
-   - `qa-e2e` escribió 3 pruebas de Playwright en `product/e2e/test_ask_page.py`.
+Los pasos 1 a 8 se corrieron el 2026-11-14 en otra conversación; se reconstruyen con
+`output/activity.jsonl` y `output/pipeline.md`.
+
+1. **Plan.** `architect` reescribió `output/plan.md` y agregó los ADR 0010, 0011 y 0012.
+2. **Aprobación del plan.** La persona aprobó el plan.
+3. **Pruebas primero.** `qa-unit` agregó las pruebas de seguridad y producción. `verification
+   unit` falló: rojo, como se esperaba.
+4. **Especialistas en paralelo.**
+   - `security` agregó `auth.py`, `ratelimit.py`, `compliance.py` y `errors.py`, además del campo de
+     clave en la página.
+   - `deploy` agregó el `Dockerfile`, `.dockerignore`, `.gitignore`, `render.yaml`, el CI en
+     `.github/workflows/` y `scripts/smoke.py`.
+   - `qa-e2e` actualizó las pruebas de punta a punta para escribir la clave.
 5. **Unión y compuertas.**
-   - Primera corrida: unit OK (75 pruebas) y contract OK (16 pruebas). QA falló con pylint en
-     9.99/10, por 2 avisos C1803 en `tests/test_agent.py` y `tests/test_levers.py`.
-   - Corrección 1. El supervisor se desvió de `/factory`, que pide relanzar a `costs` ante
-     cualquier fallo que no sea de e2e. Los avisos estaban en archivos de prueba, que `costs` no
-     puede editar, así que la corrección fue a `qa-unit`, su autor. Cambió dos aserciones sin
-     desactivar avisos y sin cambiar lo que comprueban.
-   - Segunda corrida, todas OK:
-     - unit: 75 de 75 pruebas, 97.07 % de cobertura;
-     - contract: 16 de 16 pruebas;
-     - qa: 10.00/10;
-     - e2e: 3 de 3 pruebas;
-     - evaluate: tabla de arriba.
-6. **Evaluador-optimizador.** `qa-style` escribió `output/qa-review.md` con **APROBADO** en la
-   primera línea. Dejó tres mejoras opcionales que no bloquean:
-   - `TOOL_RESULT_PREFIX` está repetido en `agent.py` y en `llm.py`;
-   - `llm._fold` duplica `directory.normalize`;
-   - el README no dice que hay que instalar el navegador de Playwright para correr `e2e`.
-7. **Pipeline y reporte.** `scripts/pipeline.py` generó `output/pipeline.md` con 15 pasos.
+   - Primera corrida: unit OK y contract OK; qa falló.
+   - Corrección 1, hecha por `qa-unit`.
+   - Segunda corrida: unit, contract, qa, e2e y evaluate, las cinco OK.
+6. **Evaluador-optimizador.** `qa-style` escribió `output/qa-review.md` con APROBADO.
+7. **Aprobación para publicar.** La persona aprobó; está en `output/approved.txt` (2026-11-14).
+8. **Publicar.** `scripts/publish.py hr-assistant` subió el producto a
+   https://github.com/chavalalo/hr-assistant. La persona conectó el Blueprint en Render y puso
+   los secretos en Render > Environment.
+9. **Humo y triage.**
+   - Primera prueba: `POST /ask` con clave dio 401.
+   - Ciclo 1 de triage: el dueño fue `persona`. El código estaba bien; el servicio en vivo no tenía
+     la clave nueva de `smoke` en `API_KEYS`. La persona redesplegó en Render.
+   - Segunda prueba: dio 400. La causa fue que, al pegar con `read -s`, la terminal metió marcas
+     invisibles de pegado (bracketed paste) en `SMOKE_API_KEY`: 55 caracteres en lugar de 43, 8 de
+     ellos inválidos. La persona cargó la clave con `pbpaste`.
+   - Tercera prueba: las tres comprobaciones OK.
+10. **Pipeline y reporte.** `scripts/pipeline.py` generó `output/pipeline.md` con 18 pasos.
 
-## Observaciones
+## Pendientes
 
-- **Prueba e2e débil.** La página no tiene un `data-testid` propio para cada respuesta, así que la
-  primera prueba e2e no puede comprobar el texto de la respuesta: lo deduce de que aparece el
-  `request-id` y no sale error. Para mejorarla, `developer` tendría que agregar ese `data-testid` a
-  la página.
-- **Aviso de pytest en e2e.** El fixture `base_url` es de sesión y está definido como método de
-  instancia, algo que pytest marca como obsoleto. No afecta el resultado.
-
-## Cómo probarlo
-
-Con el modelo simulado, que no usa red ni cuesta:
-
-```
-cd product
-uv run uvicorn app.main:app
-```
-
-Abre http://127.0.0.1:8000. Cada respuesta de `/ask` trae `model`, `route` y `cost_usd`, y
-http://127.0.0.1:8000/metrics muestra el costo acumulado.
-
-Con el modelo real: copia `product/.env.example` a `product/.env`, escribe ahí tu Account ID y tu
-token de Cloudflare (nunca en el chat ni en el código) y corre
-`uv run --env-file .env uvicorn app.main:app`.
+- **AI Gateway con autenticación.** El gateway `default` de Cloudflare exige el encabezado
+  `cf-aig-authorization`, que el producto todavía no manda. Con `MODEL_PROVIDER=gateway` responde
+  401. Se resuelve con una adenda a la especificación (variable opcional `CF_AIG_TOKEN`) que pase
+  por la fábrica.
+- **Repositorio anidado.** `scripts/publish.py` creó un repositorio git dentro de `product/`, con
+  remoto en `chavalalo/hr-assistant`. El repositorio externo sigue guardando los archivos de
+  `product/` normalmente.
+- **Para cargar claves en la terminal**, usa `export SMOKE_API_KEY="$(pbpaste | tr -d '[:space:]')"`
+  en lugar de pegar dentro de `read -s`.
