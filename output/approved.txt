@@ -1,2 +1,1 @@
-2026-11-14
-Aprobado por la persona
+Aprobado por la persona el 2026-11-19: publicar con PRs (rama reto-m4 en chavalalo/hr-assistant y en chavalalo/nextgencode-m4).

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>HR Assistant - Reto M4</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f172a; color: #f8fafc;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  .card { display: none; height: 100%; box-sizing: border-box; padding: 8vh 10vw;
+    flex-direction: column; justify-content: center; }
+  .card.on { display: flex; }
+  .step { font-size: 2.2vw; color: #38bdf8; letter-spacing: .08em; text-transform: uppercase; }
+  h1 { font-size: 5vw; margin: .3em 0 .5em; line-height: 1.1; }
+  p { font-size: 2.4vw; line-height: 1.45; color: #cbd5e1; margin: .2em 0; max-width: 70vw; }
+  code { color: #fbbf24; }
+  .hint { position: fixed; bottom: 2vh; right: 3vw; font-size: 1vw; color: #475569; }
+</style>
+</head>
+<body>
+<section class="card on" data-testid="card-1">
+  <div class="step">Reto M4 · Sistema multi-agente en producción</div>
+  <h1>HR Assistant</h1>
+  <p>Guardián → caché → supervisor → especialista (directorio o políticas) → revisor.</p>
+  <p>Construido por una fábrica de agentes: una persona escribe la especificación y aprueba; el código de verificación decide.</p>
+</section>
+<section class="card" data-testid="card-2">
+  <div class="step">1 · Demo en producción</div>
+  <h1>Cada pregunta va a su especialista</h1>
+  <p>Empleados y departamentos → <code>directory</code>. Políticas de RH → <code>policy</code>.</p>
+  <p>La inyección de prompt se bloquea antes del modelo. Los datos personales se ocultan. Una pregunta repetida sale de la caché.</p>
+</section>
+<section class="card" data-testid="card-3">
+  <div class="step">2 · Observabilidad</div>
+  <h1>Tablero en vivo</h1>
+  <p>Peticiones, errores, latencia contra el SLO, costo, caché, decisiones del supervisor y eventos de seguridad.</p>
+  <p>Solo el cliente <code>admin</code> lo ve: mínimo privilegio (403 para los demás).</p>
+</section>
+<section class="card" data-testid="card-4">
+  <div class="step">3 · Trazas</div>
+  <h1>Un run por agente en LangSmith</h1>
+  <p>Guardián, supervisor, especialista con sus herramientas y revisor.</p>
+  <p>Entradas y salidas ocultas: la PII no sale del servicio. El <code>request_id</code> cruza la traza con el log.</p>
+</section>
+<section class="card" data-testid="card-5">
+  <div class="step">4 · Un caso real</div>
+  <h1>El modelo inventó «5 días»</h1>
+  <p>En producción, el especialista de políticas respondió sin consultar la política (12 días hábiles). Las pruebas con modelo simulado no podían verlo.</p>
+  <p>Corrección: la política llega en código y el revisor reemplaza cualquier cifra que no esté en ella.</p>
+</section>
+<section class="card" data-testid="card-6">
+  <div class="step">5 · Resultados</div>
+  <h1>Costos y calidad</h1>
+  <p>Palancas de costo: −86 % frente a la línea base. Caché: −67 %. Calidad: 100 % en las cuatro configuraciones.</p>
+  <p>133 pruebas, 41 contratos, pylint 10/10. Humo y carga en Render sin errores 5xx.</p>
+</section>
+<div class="hint">← → para cambiar de tarjeta</div>
+<script>
+  const cards = [...document.querySelectorAll(".card")];
+  let current = 0;
+  function show(index) {
+    current = Math.max(0, Math.min(cards.length - 1, index));
+    cards.forEach((card, i) => card.classList.toggle("on", i === current));
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowRight" || event.key === " ") show(current + 1);
+    if (event.key === "ArrowLeft") show(current - 1);
+  });
+  document.addEventListener("click", () => show(current + 1));
+</script>
+</body>
+</html>

@@ -3,6 +3,11 @@
 Corre ``verification/eval_set.json`` contra el producto dos veces, con el modelo
 simulado. Cada pregunta lleva un historial de relleno, como una conversación
 larga. Pasa solo si la calidad no baja y el costo sí baja.
+
+Reto: además corre ``verification/eval_set_reto.json`` (directorio y políticas)
+REPETIDO, como varias personas que hacen las mismas preguntas, sin historial: con
+la caché de respuestas apagada y encendida. También debe bajar el costo sin bajar
+la calidad.
 """
 
 import json
@@ -12,6 +17,9 @@ from pathlib import Path
 from verification.server import running_product
 
 EVAL_SET = Path(__file__).resolve().parent / "eval_set.json"
+EVAL_SET_RETO = Path(__file__).resolve().parent / "eval_set_reto.json"
+REPEATS = 3
+CACHE_ON = {"ANSWER_CACHE_TTL_SECONDS": "300"}
 BASELINE = {"ROUTING": "false", "HISTORY_WINDOW": "1000"}
 HISTORY = [
     {"role": role, "content": text}
@@ -30,16 +38,17 @@ def is_correct(answer: str, case: dict) -> bool:
     return any(text.lower() in answer.lower() for text in case["any_of"])
 
 
-def measure(client, cases: list[dict]) -> dict:
+def measure(client, cases: list[dict], history=None) -> dict:
     """Pregunta cada caso y suma calidad y costo.
 
     :return: ``quality`` (fracción correcta), ``cost_usd`` e ``input_tokens``
     :rtype: dict
     """
+    history = HISTORY if history is None else history
     correct, cost, tokens = 0, 0.0, 0
     for case in cases:
         body = client.post(
-            "/ask", json={"question": case["question"], "history": HISTORY}
+            "/ask", json={"question": case["question"], "history": history}
         ).json()
         correct += is_correct(body["answer"], case)
         cost += body["cost_usd"]
@@ -54,19 +63,40 @@ def verdict(baseline: dict, levers: dict) -> bool:
     )
 
 
+def no_regression(levers: dict) -> bool:
+    """Reto: el conjunto original se responde completo, como en las sesiones 1 a 4.
+
+    Sin esta regla, una regresión que baja la calidad de la línea base y de las
+    palancas por igual pasaría el veredicto relativo.
+    """
+    return levers["quality"] == 1.0
+
+
 def main() -> int:
-    """Mide las dos configuraciones, imprime la tabla y decide."""
+    """Mide las configuraciones, imprime la tabla y decide."""
     cases = json.loads(EVAL_SET.read_text(encoding="utf-8"))
     with running_product(8767, **BASELINE) as client:
         baseline = measure(client, cases)
     with running_product(8768) as client:
         levers = measure(client, cases)
-    for name, result in (("baseline", baseline), ("levers", levers)):
+    repeated = json.loads(EVAL_SET_RETO.read_text(encoding="utf-8")) * REPEATS
+    with running_product(8775) as client:
+        no_cache = measure(client, repeated, history=[])
+    with running_product(8776, **CACHE_ON) as client:
+        cache = measure(client, repeated, history=[])
+    rows = (("baseline", baseline), ("levers", levers),
+            ("no_cache", no_cache), ("cache", cache))
+    for name, result in rows:
         print(
             f"{name:9} quality={result['quality']:.0%} "
             f"cost_usd={result['cost_usd']:.6f} input_tokens={result['input_tokens']}"
         )
-    passed = verdict(baseline, levers)
+    passed = (
+        verdict(baseline, levers)
+        and verdict(no_cache, cache)
+        and no_regression(levers)
+        and no_regression(cache)
+    )
     return 0 if passed else 1
 
 

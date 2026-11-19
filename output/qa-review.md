@@ -1,34 +1,54 @@
 APROBADO
 
-`uv run python -m verification qa` pasa (pylint 10.00/10, [OK] qa).
+Revisión de QA, segunda y última vuelta. Comprobé los cinco hallazgos de la primera vuelta y
+busqué incumplimientos graves nuevos. `uv run python -m verification qa` pasa (pylint
+10.00/10). `uv run python -m verification evaluate` pasa y da las mismas cifras que
+`doc/costs.md`. La excepción acordada del idioma (código en inglés; comentarios y documentos
+en español) no se reporta.
 
-Revisión manual de la sesión 4 (clave por cliente, límite, compliance, contenedor, CI y Render) sin
-incumplimientos claros de QA.md:
+## Hallazgos de la primera vuelta
 
-- Nombres: claros y en inglés en `app/auth.py`, `app/ratelimit.py`, `app/compliance.py`, `app/errors.py`,
-  `scripts/smoke.py` y en las pruebas nuevas (`security.feature`, `test_auth.py`, `test_ratelimit.py`,
-  `test_compliance.py`, `test_security_api.py`).
-- Funciones: pequeñas y con una sola responsabilidad. `parse_api_keys` delega en `_parse_entry` y `_malformed`;
-  `compliance.violations` junta tres reglas puras; `RateLimiter.check` solo decide; `require_client` solo
-  valida la clave y aplica el límite; `config._security_settings` agrupa lo nuevo.
-- Configuración: `ENVIRONMENT`, `API_KEYS` y `RATE_LIMIT_PER_MINUTE` vienen del entorno y se validan con
-  `ConfigError`. Lo que queda fijo (ventana de 60 s, mínimo de 16 caracteres, textos de 401 y 429) es regla de
-  la spec y tiene nombre propio.
-- Docstrings: estilo Sphinx en clases y funciones públicas, con `:raises:` donde aplica.
-- Errores: `API_KEYS` mal formada falla con posición y largo, sin el valor y sin arrastrar la excepción
-  (`from None`); compliance lanza `ConfigError` sin valores; `smoke.py` reporta solo el tipo de error de red.
-- Hora y dependencias: `RateLimiter` usa el reloj inyectado; las pruebas lo avanzan a mano.
-- Seguridad: claves comparadas con `hmac.compare_digest` contra todas; `ApiClient.key` y `api_clients` con
-  `repr=False`; la página guarda la clave solo en `sessionStorage`; `.env.example` y `render.yaml` no traen
-  secretos (`sync: false`); la clave de CI es de ejemplo y está marcada como tal.
-- README: explica cómo correrlo local y con Docker, cómo publicar, la prueba de humo, las rutas con y sin
-  clave, las variables nuevas y cada verificación.
-- ADR: 0010, 0011 y 0012 describen lo que hace el código; 0001 a 0009 siguen vigentes (la API sigue sin
-  estado de negocio; el límite en memoria es coherente con 0005). `doc/compliance-checklist.md` tiene la tabla
-  de tres columnas.
-- Log: `request`, `audit` y `agent_run` llevan `client`; `auth_rejected` solo `reason`; `rate_limited` solo
-  `client` y `retry_after`; nunca la clave ni el texto de la pregunta.
+1. **`doc/security.md`, `doc/costs.md` y `doc/operations.md`: corregido.** Existen los tres.
+   `security.md` tiene el modelo de amenazas y la tabla de control, dónde vive y qué prueba lo
+   comprueba, más los riesgos abiertos. `costs.md` tiene las palancas, la tabla de
+   `verification evaluate` (baseline 0.000922, levers 0.000126, no_cache 0.000308 y cache
+   0.000103, que coinciden con la salida real) y los trade-offs. `operations.md` cubre
+   despliegue, variables, CI, `load_test.py` (con `SMOKE_API_KEY` y el aviso de los 429 por
+   `RATE_LIMIT_PER_MINUTE`), `cost_report.py`, la salida de `verification load` y el tablero.
+   El README los enlaza desde «Publicar en Render».
+2. **README y `.env.example`: corregido.** «Publicar en Render» nombra `METRICS_CLIENTS`
+   (`sync: false`, obligatoria, debe nombrar clientes de `API_KEYS`),
+   `ANSWER_CACHE_TTL_SECONDS=300` y el health check en `/ready`, igual que `render.yaml`.
+   `.env.example` trae `POLICIES_PATH=data/policies.json` con su comentario.
+3. **ADR 0014: corregido.** La decisión excluye los ids que la persona escribió (se comparan
+   sin mayúsculas contra la pregunta ya redactada). «Consecuencias» dice que un id inexistente
+   que se preguntó recibe «no existe». Coincide con `app/reviewer.py`.
+4. **Auditoría de `tool_call`: corregido.** `_audit_args` (`app/pipeline.py`, líneas 216-237)
+   aplica `redact(value).text[:AUDIT_ARG_MAX_CHARS]`. `tests/test_audit_redaction.py` usa un
+   modelo espía con un correo y un teléfono al principio del argumento. Comprueba que el log
+   lleva `[EMAIL]` y `[PHONE]`, que el texto sale recortado y que los valores nunca aparecen.
+5. **Reglas duplicadas: corregido.** `EMPLOYEE_ID_PATTERN` y `normalize` se definen solo en
+   `app/directory.py`. `supervisor.py`, `reviewer.py`, `llm.py`, `guard.py` y `cache.py` los
+   importan de ahí. `cache.normalize_question` usa `normalize`. `USER_ROLE` se define solo en
+   `app/guard.py` (`pipeline.py` lo importa) y `TOOL_RESULT_PREFIX` solo en `app/agent.py`
+   (`llm.py` lo importa).
 
-Mejoras opcionales que no bloquean la aprobación: `pylint` y `pytest-playwright` se instalan aparte en
-`ci.yml` en vez de estar fijados en `requirements.txt`; el servicio de `render.yaml` se llama `hr-assistant`
-y debe ajustarse al nombre del repositorio que dé la persona al publicar.
+## Coherencia de los documentos nuevos con el código
+
+Revisé por muestreo los nombres de variables, archivos, pruebas y cifras:
+
+- Las variables y valores de `render.yaml` coinciden con lo que dicen el README y
+  `operations.md`.
+- Los parámetros del script coinciden con `operations.md`: `--requests` 60,
+  `--concurrency` 10, `SMOKE_API_KEY`, timeout de 90 s, código de salida 1 con 5xx y 2 sin
+  clave.
+- La prueba citada en `security.md` (`test_dashboard_is_public_and_carries_no_data_or_key`)
+  existe.
+- Las cifras de `costs.md` coinciden con `verification evaluate`.
+
+No encontré contradicciones.
+
+## Sin hallazgos nuevos
+
+No hay incumplimientos graves nuevos de QA.md. El log de auditoría ya no tiene un camino sin
+redactar, no hay secretos en el repositorio ni en el Blueprint y la documentación está al día.
