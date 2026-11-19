@@ -22,7 +22,7 @@ from app.agent import STOPPED_ANSWER
 from app.cache import normalize_question
 from app.costs import COST_DECIMALS
 from app.gateway import ModelUnavailable
-from app.guard import InputBlocked, inspect
+from app.guard import USER_ROLE, InputBlocked, inspect
 from app.levers import choose_model, trim_history
 from app.metrics import (
     BLOCKED_INPUTS,
@@ -31,6 +31,7 @@ from app.metrics import (
     SUPERVISOR_MODEL,
     SUPERVISOR_RULE,
 )
+from app.pii import redact
 from app.resilience import run_with_fallback
 from app.reviewer import BLOCK_REASON as REVIEW_BLOCK_REASON
 from app.reviewer import review
@@ -44,7 +45,6 @@ AGENT_SUPERVISOR = "supervisor"
 AGENT_REVIEWER = "reviewer"
 AGENT_CACHE = "cache"
 AUDIT_ARG_MAX_CHARS = 200
-USER_ROLE = "user"
 
 
 @dataclass(frozen=True)
@@ -214,15 +214,25 @@ class AskOutcome:  # pylint: disable=too-many-instance-attributes
 
 
 def _audit_args(args):
-    """Recorta los argumentos de una herramienta para el log de auditoría.
+    """Redacta y recorta los argumentos de una herramienta para el log.
+
+    Los argumentos los escribe el modelo y pueden copiar un dato personal que
+    vio antes (por ejemplo, un correo de ``get_employee``): cada texto pasa
+    por ``app.pii.redact`` antes de recortarse, así el log solo lleva
+    marcadores como ``[EMAIL]`` y nunca el valor.
 
     :param args: Argumentos con que se llamó la herramienta
     :type args: dict
-    :return: Argumentos con los textos recortados a ``AUDIT_ARG_MAX_CHARS``
+    :return: Argumentos con los textos redactados y recortados a
+        ``AUDIT_ARG_MAX_CHARS``
     :rtype: dict
     """
     return {
-        key: value[:AUDIT_ARG_MAX_CHARS] if isinstance(value, str) else value
+        key: (
+            redact(value).text[:AUDIT_ARG_MAX_CHARS]
+            if isinstance(value, str)
+            else value
+        )
         for key, value in args.items()
     }
 

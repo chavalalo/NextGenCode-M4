@@ -8,10 +8,9 @@ Si la respuesta no sirve o el modelo no responde, usa ``directory``.
 """
 
 import json
-import re
 from dataclasses import dataclass, field
 
-from app.directory import normalize
+from app.directory import EMPLOYEE_ID_PATTERN, normalize
 from app.gateway import ModelUnavailable
 from app.policies import phrase_pattern
 from app.prompts import SUPERVISOR_PROMPT
@@ -25,7 +24,6 @@ ROUTE_POLICY = "rule:policy"
 ROUTE_MODEL = "model"
 ROUTE_MODEL_INVALID = "model_invalid"
 RULE_ROUTES = (ROUTE_EMPLOYEE, ROUTE_DEPARTMENT, ROUTE_POLICY)
-EMPLOYEE_ID_PATTERN = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

@@ -3,10 +3,11 @@
 import json
 import re
 import time
-import unicodedata
 from typing import Protocol, Sequence
 
+from app.agent import TOOL_RESULT_PREFIX
 from app.completion import Completion
+from app.directory import EMPLOYEE_ID_PATTERN, normalize
 from app.gateway import GatewayModel, ModelUnavailable
 from app.policies import phrase_pattern
 from app.prompts import POLICY_PROMPT, SUPERVISOR_PROMPT
@@ -22,11 +23,9 @@ __all__ = [
     "count_words",
 ]
 
-TOOL_RESULT_PREFIX = "Resultado de la herramienta: "
 ANSWER_PREFIX = "Según el directorio: "
 POLICY_ANSWER_PREFIX = "Según la política: "
 HELP_ANSWER = "Pregúntame por un empleado (EMP-0001) o un departamento."
-EMPLOYEE_ID_PATTERN = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
 FAKE_MODEL_NAME = "fake"
 
 
@@ -41,20 +40,6 @@ class LanguageModel(Protocol):  # pylint: disable=too-few-public-methods
         :return: Respuesta del modelo
         :rtype: Completion
         """
-
-
-def _fold(text):
-    """Quita acentos y pasa a minúsculas para comparar textos.
-
-    :param text: Texto original
-    :type text: str
-    :return: Texto normalizado
-    :rtype: str
-    """
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(
-        char for char in decomposed if not unicodedata.combining(char)
-    ).casefold()
 
 
 def _system_prompt(messages):
@@ -177,7 +162,7 @@ class FakeModel:
         :return: Tema de la política o ``None``
         :rtype: str or None
         """
-        folded = _fold(text)
+        folded = normalize(text)
         for pattern, topic in self._policy_patterns:
             if pattern.search(folded):
                 return topic
@@ -191,9 +176,9 @@ class FakeModel:
         :return: El departamento encontrado o ``None``
         :rtype: str or None
         """
-        folded = _fold(text)
+        folded = normalize(text)
         for department in self._departments:
-            pattern = r"\b" + re.escape(_fold(department)) + r"\b"
+            pattern = r"\b" + re.escape(normalize(department)) + r"\b"
             if re.search(pattern, folded):
                 return department
         return None

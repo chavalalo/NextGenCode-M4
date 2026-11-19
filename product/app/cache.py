@@ -7,23 +7,23 @@ estructura porque FastAPI atiende varias peticiones a la vez.
 """
 
 import threading
-import unicodedata
 from collections import OrderedDict
+
+from app.directory import normalize
 
 
 def normalize_question(question):
     """Normaliza una pregunta para usarla como llave de la caché.
+
+    Usa ``app.directory.normalize`` (sin acentos y en minúsculas) y además
+    colapsa los espacios.
 
     :param question: Pregunta ya revisada por el guardián
     :type question: str
     :return: Pregunta en minúsculas, sin acentos y con espacios colapsados
     :rtype: str
     """
-    decomposed = unicodedata.normalize("NFKD", str(question))
-    without_accents = "".join(
-        char for char in decomposed if not unicodedata.combining(char)
-    )
-    return " ".join(without_accents.casefold().split())
+    return " ".join(normalize(str(question)).split())
 
 
 class AnswerCache:

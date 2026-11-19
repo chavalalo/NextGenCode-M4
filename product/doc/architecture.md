@@ -9,6 +9,16 @@ dos especialistas (`directory` y `policy`), un revisor a la salida, una caché d
 reintentos con modelo de respaldo, mínimo privilegio en `/metrics`, auditoría y métricas de
 negocio.
 
+## Documentos
+
+- [Seguridad](security.md): modelo de amenazas y tabla de controles (dónde vive cada uno y qué
+  prueba lo comprueba).
+- [Costos](costs.md): palancas, evidencia de `verification evaluate` contra la línea base y
+  trade-offs entre costo y calidad.
+- [Operación](operations.md): despliegue en Render, variables, CI, pruebas de humo y de carga,
+  tablero, `/metrics`, LangSmith y qué hacer ante 502, respaldo, 429 y 403.
+- [Lista de compliance](compliance-checklist.md): reglas de producción revisadas al arrancar.
+
 ## Sistema multi-agente
 
 ```mermaid
@@ -30,7 +40,7 @@ flowchart LR
         SUP["agent.supervisor<br/>reglas: employee, department, policy<br/>si no, MODEL_SMALL"]
         DIRA["agent.directory<br/>get_employee<br/>search_by_department"]
         POLA["agent.policy<br/>search_policy"]
-        REV["agent.reviewer<br/>reviewer.py<br/>PII, id inexistente, recorte"]
+        REV["agent.reviewer<br/>reviewer.py<br/>PII, id inventado, recorte"]
     end
     DIR[("directory.py<br/>data/employees.json")]
     POL[("policies.py<br/>data/policies.json")]
@@ -186,4 +196,7 @@ sequenceDiagram
 | `PORT` | `8000` | Lo pone Render; solo lo usa el `CMD` del contenedor |
 
 Los secretos (`API_KEYS`, `CF_API_TOKEN`, `CF_AIG_TOKEN`, `LANGSMITH_API_KEY`) nunca se escriben en el log, en
-la traza, en un error, en `.env.example` ni en el repositorio: en Render van con `sync: false`.
+la traza, en un error, en `.env.example` ni en el repositorio. En Render, `API_KEYS`, `CF_ACCOUNT_ID`,
+`CF_API_TOKEN` y `METRICS_CLIENTS` van en el Blueprint (`render.yaml`) con `sync: false`: Render pide su valor
+y no lo guarda en el repositorio. `CF_AIG_TOKEN` y `LANGSMITH_API_KEY` no están en el Blueprint: si se usan, se
+agregan a mano en Render > Environment.

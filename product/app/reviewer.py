@@ -7,12 +7,11 @@ recorta a ``MAX_ANSWER_CHARS``. Los ids se comparan sin distinguir
 mayúsculas. Nunca escribe el texto que revisa.
 """
 
-import re
 from dataclasses import dataclass
 
+from app.directory import EMPLOYEE_ID_PATTERN
 from app.pii import redact
 
-EMPLOYEE_ID_PATTERN = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
 UNVERIFIED_ANSWER = (
     "No pude verificar la respuesta con el directorio. Intenta de nuevo."
 )

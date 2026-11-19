@@ -59,10 +59,32 @@ La imagen usa `python:3.12-slim`, corre con un usuario que no es root y escucha 
 
 Una persona aprueba la publicación; después `scripts/publish.py` (en la raíz de la
 fábrica) crea el repositorio en GitHub y hace el push. `render.yaml` es un Blueprint
-con `ENVIRONMENT=production`, `MODEL_PROVIDER=gateway`, `HIDE_INPUTS=true` y
-`HIDE_OUTPUTS=true`; `API_KEYS`, `CF_ACCOUNT_ID` y `CF_API_TOKEN` se escriben en Render
-(`sync: false`), nunca en el repositorio. Render publica solo si el pipeline de CI
-pasa. Para comprobar el servicio publicado (la clave se escribe sin que se vea y no
+con `ENVIRONMENT=production`, `MODEL_PROVIDER=gateway`, `HIDE_INPUTS=true`,
+`HIDE_OUTPUTS=true` y `ANSWER_CACHE_TTL_SECONDS=300` (caché de respuestas de 5
+minutos). El health check de Render es `GET /ready`: no manda tráfico a una instancia
+a la que le falte el directorio, las políticas o los precios.
+
+Estas variables se escriben en Render (`sync: false`), nunca en el repositorio:
+
+- `API_KEYS`: clientes y claves (`cliente:clave`, 16 caracteres o más por clave).
+- `CF_ACCOUNT_ID` y `CF_API_TOKEN`: cuenta y token de Cloudflare.
+- `METRICS_CLIENTS`: obligatoria en producción. Clientes que pueden leer
+  `GET /metrics`, separados por coma; cada nombre debe ser un cliente de `API_KEYS`.
+  Si queda vacía o nombra un cliente que no existe, el producto no arranca
+  (compliance).
+
+Son opcionales y no vienen en el Blueprint; si se usan, se agregan a mano en
+Render > Environment:
+
+- `CF_AIG_TOKEN`: token de AI Gateway autenticado (secreto).
+- `LANGSMITH_API_KEY`: clave de LangSmith, solo con `LANGSMITH_TRACING=true` (secreto).
+
+Render publica solo si el pipeline de CI pasa. La operación del servicio (tablero,
+prueba de carga, reporte de costo) está en [doc/operations.md](doc/operations.md); el
+modelo de amenazas y los controles, en [doc/security.md](doc/security.md); la
+evidencia de costo, en [doc/costs.md](doc/costs.md).
+
+Para comprobar el servicio publicado (la clave se escribe sin que se vea y no
 queda en el historial de la terminal):
 
 ```bash

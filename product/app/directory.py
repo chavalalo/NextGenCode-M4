@@ -1,9 +1,17 @@
-"""Directorio de empleados de solo lectura y sus dos herramientas."""
+"""Directorio de empleados de solo lectura y sus dos herramientas.
+
+Es el dueño del formato del id de empleado (``EMPLOYEE_ID_PATTERN``) y de la
+normalización de textos (``normalize``): supervisor, revisor, modelo simulado
+y caché los importan de aquí para que no haya copias distintas de la regla.
+"""
 
 import json
+import re
 import unicodedata
 from pathlib import Path
 from types import MappingProxyType
+
+EMPLOYEE_ID_PATTERN = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
 
 
 def normalize(text):
