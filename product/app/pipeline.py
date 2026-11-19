@@ -328,7 +328,9 @@ class AskPipeline:
         run = self._run_specialist(
             deps.specialists[decision.specialist], messages, route.model
         )
-        reviewed = self._review(request_id, client, run.result.answer)
+        reviewed = self._review(
+            request_id, client, run.result.answer, guarded.question
+        )
         input_tokens, output_tokens, cached_calls = _sum_tokens(
             list(decision.completions) + list(run.result.completions)
         )
@@ -552,12 +554,13 @@ class AskPipeline:
             result=attempt.value, model=attempt.model, fallback=attempt.fallback
         )
 
-    def _review(self, request_id, client, answer):
+    def _review(self, request_id, client, answer, question=""):
         """Revisor de salida.
 
         Redacta la PII de la respuesta, reemplaza las que citan ids
-        ``EMP-dddd`` inexistentes y recorta a ``MAX_ANSWER_CHARS``. El
-        ``audit`` lleva solo tipos, conteo y motivo: nunca la respuesta.
+        ``EMP-dddd`` inexistentes que la persona no escribió en su pregunta
+        (ids inventados) y recorta a ``MAX_ANSWER_CHARS``. El ``audit`` lleva
+        solo tipos, conteo y motivo: nunca la respuesta.
 
         :param request_id: Id de la petición
         :type request_id: str
@@ -565,11 +568,18 @@ class AskPipeline:
         :type client: str
         :param answer: Respuesta del especialista
         :type answer: str
+        :param question: Pregunta ya redactada por el guardián
+        :type question: str
         :return: Respuesta revisada
         :rtype: ReviewedAnswer
         """
         deps = self._deps
-        result = review(answer, deps.directory, deps.settings.max_answer_chars)
+        result = review(
+            answer,
+            deps.directory,
+            deps.settings.max_answer_chars,
+            question=question,
+        )
         self._audit_pii(request_id, client, LOCATION_OUTPUT, result)
         if result.blocked:
             deps.logger.emit(

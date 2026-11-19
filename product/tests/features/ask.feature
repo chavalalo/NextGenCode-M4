@@ -22,7 +22,7 @@ Feature: Ask the HR assistant
     When I ask "¿Quién es EMP-9999?"
     Then the response status is 200
     And the tools used are "get_employee"
-    And the answer is "No pude verificar la respuesta con el directorio. Intenta de nuevo."
+    And the answer mentions "No existe un empleado con id EMP-9999"
 
   Scenario: Ask something unrelated
     Given the HR assistant is running

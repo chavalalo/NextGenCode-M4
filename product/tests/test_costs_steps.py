@@ -1,10 +1,7 @@
 """Pasos de ``features/costs.feature``: enrutador, ventana, gateway y costo."""
 
 import httpx
-import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
-
-from app.llm import FakeModel
 
 scenarios("features/costs.feature")
 
@@ -12,25 +9,6 @@ SMALL = "@cf/meta/llama-3.1-8b-instruct-fast"
 LARGE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 GATEWAY_PROMPT_TOKENS = 42
 GATEWAY_COMPLETION_TOKENS = 7
-
-
-@pytest.fixture
-def context():
-    """Datos que un paso deja para los siguientes (espía, historial, pregunta)."""
-    return {}
-
-
-class SpyModel:  # pylint: disable=too-few-public-methods
-    """Modelo simulado que guarda los mensajes de cada llamada."""
-
-    def __init__(self, model):
-        self._model = model
-        self.calls = []
-
-    def complete(self, messages):
-        """Anota los mensajes y delega en el modelo simulado."""
-        self.calls.append([dict(message) for message in messages])
-        return self._model.complete(messages)
 
 
 def gateway_client(status, headers=None):
@@ -79,12 +57,12 @@ def priced_assistant_with(make_cost_client, name, value):
     ),
     target_fixture="client",
 )
-def priced_assistant_with_spy(make_cost_client, directory, window, context):
+def priced_assistant_with_spy(make_cost_client, spy_model, window, context):
     """Aplicación cuyos dos modelos son el mismo espía."""
-    spy = SpyModel(FakeModel(directory.departments()))
-    context["spy"] = spy
+    context["spy"] = spy_model
     return make_cost_client(
-        {"HISTORY_WINDOW": str(window)}, models={SMALL: spy, LARGE: spy}
+        {"HISTORY_WINDOW": str(window)},
+        models={SMALL: spy_model, LARGE: spy_model},
     )
 
 

@@ -157,8 +157,12 @@ el dato que hay que pasar a soporte.
   pregunta y el historial (antes del modelo, el log y la traza) y en la respuesta. Los
   tipos ocultados salen en `pii_redacted`. Los ids `EMP-dddd` nunca son PII.
 - **Revisor de salida** (`app/reviewer.py`). Oculta la PII de la respuesta; si cita un
-  id `EMP-dddd` que no existe, la reemplaza por «No pude verificar la respuesta con el
-  directorio. Intenta de nuevo.»; al final la recorta a `MAX_ANSWER_CHARS`.
+  id `EMP-dddd` que no existe en el directorio **y que la persona no escribió en su
+  pregunta** (un id inventado por el modelo), la reemplaza por «No pude verificar la
+  respuesta con el directorio. Intenta de nuevo.»; al final la recorta a
+  `MAX_ANSWER_CHARS`. Si la persona preguntó por un id que no existe, la respuesta
+  puede decirlo («EMP-0099 no existe»). Los ids se comparan sin distinguir
+  mayúsculas, contra la pregunta ya redactada por el guardián.
 - **Mínimo privilegio.** Con `METRICS_CLIENTS` con valor, solo esos clientes leen
   `GET /metrics`; otro cliente con clave válida recibe `403 {"detail": "forbidden"}`.
   Vacía, todos los clientes pueden leerlas (solo para desarrollo).

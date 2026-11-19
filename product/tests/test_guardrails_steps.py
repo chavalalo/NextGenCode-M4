@@ -1,36 +1,44 @@
 """Pasos de ``features/guardrails.feature``: guardián, revisor y mínimo privilegio."""
 
-import pytest
+import json
+
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from app.llm import FakeModel
+from app.completion import Completion
 
 scenarios("features/guardrails.feature")
 
 SMALL = "@cf/meta/llama-3.1-8b-instruct-fast"
 LARGE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 BLOCKED_DETAIL = "request blocked by input policy"
+INVENTED_ANSWER_START = "El responsable del área es"
 # Claves de prueba (16+ caracteres): no son secretos reales.
 KEYS = {"tester": "tester-key-0123456789", "admin": "admin-key-0123456789"}
 
 
-@pytest.fixture
-def context():
-    """Datos que un paso deja para los siguientes (espía y texto enviado)."""
-    return {}
+class InventingModel:  # pylint: disable=too-few-public-methods
+    """Modelo simulado que contesta citando un id que la persona no escribió.
 
+    :param invented_id: Id ``EMP-dddd`` que el modelo se inventa
+    :type invented_id: str
+    """
 
-class SpyModel:  # pylint: disable=too-few-public-methods
-    """Modelo simulado que guarda los mensajes de cada llamada."""
-
-    def __init__(self, model):
-        self._model = model
-        self.calls = []
+    def __init__(self, invented_id):
+        self.invented_id = invented_id
 
     def complete(self, messages):
-        """Anota los mensajes y delega en el modelo simulado."""
-        self.calls.append([dict(message) for message in messages])
-        return self._model.complete(messages)
+        """Responde siempre con el id inventado, sin pedir herramientas.
+
+        :param messages: Mensajes con ``role`` y ``content``
+        :type messages: Sequence[dict]
+        :return: Respuesta final del especialista
+        :rtype: app.completion.Completion
+        """
+        answer = f"{INVENTED_ANSWER_START} {self.invented_id}."
+        text = json.dumps({"answer": answer}, ensure_ascii=False)
+        return Completion(
+            text=text, input_tokens=len(messages), output_tokens=len(text.split())
+        )
 
 
 def audits(read_log, action):
@@ -59,11 +67,23 @@ def guarded_assistant(make_cost_client):
 @given(
     "the guarded HR assistant is running with a spy model", target_fixture="client"
 )
-def guarded_assistant_with_spy(make_cost_client, directory, context):
+def guarded_assistant_with_spy(make_cost_client, spy_model, context):
     """Aplicación cuyos dos modelos son el mismo espía."""
-    spy = SpyModel(FakeModel(directory.departments()))
-    context["spy"] = spy
-    return make_cost_client(models={SMALL: spy, LARGE: spy})
+    context["spy"] = spy_model
+    return make_cost_client(models={SMALL: spy_model, LARGE: spy_model})
+
+
+@given(
+    parsers.parse(
+        'the guarded HR assistant is running with a model that invents "{invented_id}"'
+    ),
+    target_fixture="client",
+)
+def guarded_assistant_with_inventing_model(make_cost_client, directory, invented_id):
+    """Aplicación cuyo modelo cita un id que no está en el directorio."""
+    assert not directory.has_employee(invented_id)
+    model = InventingModel(invented_id)
+    return make_cost_client(models={SMALL: model, LARGE: model})
 
 
 @given(
@@ -196,7 +216,20 @@ def audit_records_blocked_output(read_log, log_stream, reason):
     blocked = audits(read_log, "output_blocked")
     assert len(blocked) == 1
     assert blocked[0]["reason"] == reason
-    assert "No existe un empleado" not in log_stream.getvalue()
+    assert blocked[0]["client"] == "tester"
+    assert INVENTED_ANSWER_START not in log_stream.getvalue()
+
+
+@then(parsers.parse('the answer mentions "{text}"'))
+def answer_mentions(response, text):
+    """La respuesta contiene el texto, con sus acentos tal cual."""
+    assert text in response.json()["answer"]
+
+
+@then("the audit records no blocked output")
+def audit_records_no_blocked_output(read_log):
+    """Un id que escribió la persona no cuenta como inventado."""
+    assert audits(read_log, "output_blocked") == []
 
 
 @then(parsers.parse("the metrics count {count:d} blocked output"))

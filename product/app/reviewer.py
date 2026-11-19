@@ -1,8 +1,10 @@
 """Revisor de salida: PII, respuesta anclada al directorio y recorte.
 
 En este orden: oculta la PII de la respuesta; si menciona un id ``EMP-dddd``
-que no existe en el directorio, la reemplaza por un mensaje fijo; al final la
-recorta a ``MAX_ANSWER_CHARS``. Nunca escribe el texto que revisa.
+que no existe en el directorio y que la persona no escribió en su pregunta (un
+id inventado por el modelo), la reemplaza por un mensaje fijo; al final la
+recorta a ``MAX_ANSWER_CHARS``. Los ids se comparan sin distinguir
+mayúsculas. Nunca escribe el texto que revisa.
 """
 
 import re
@@ -37,23 +39,41 @@ class Review:
     blocked: bool = False
 
 
-def mentions_unknown_employee(text, directory):
-    """Indica si el texto cita un id de empleado que no existe.
+def employee_ids(text):
+    """Extrae los ids ``EMP-dddd`` de un texto, normalizados en mayúsculas.
+
+    :param text: Texto donde buscar
+    :type text: str
+    :return: Ids encontrados, sin repetir
+    :rtype: frozenset[str]
+    """
+    return frozenset(
+        match.group(0).upper() for match in EMPLOYEE_ID_PATTERN.finditer(text)
+    )
+
+
+def mentions_unknown_employee(text, directory, asked_ids=frozenset()):
+    """Indica si el texto cita un id inventado: inexistente y no preguntado.
+
+    Un id que no está en el directorio pero que la persona escribió en su
+    pregunta no cuenta: la respuesta puede decir que no existe.
 
     :param text: Respuesta del especialista
     :type text: str
     :param directory: Directorio de empleados
     :type directory: app.directory.EmployeeDirectory
-    :return: ``True`` si algún id no está en el directorio
+    :param asked_ids: Ids de la pregunta, en mayúsculas
+    :type asked_ids: frozenset[str]
+    :return: ``True`` si algún id no está en el directorio ni en la pregunta
     :rtype: bool
     """
     return any(
-        not directory.has_employee(match.group(0))
-        for match in EMPLOYEE_ID_PATTERN.finditer(text)
+        employee_id not in asked_ids and not directory.has_employee(employee_id)
+        for employee_id in employee_ids(text)
     )
 
 
-def review(answer, directory, max_chars):
+def review(answer, directory, max_chars, question=""):
     """Revisa la respuesta del especialista antes de mandarla.
 
     :param answer: Respuesta del especialista
@@ -62,11 +82,16 @@ def review(answer, directory, max_chars):
     :type directory: app.directory.EmployeeDirectory
     :param max_chars: Largo máximo de la respuesta
     :type max_chars: int
+    :param question: Pregunta de la persona, ya redactada por el guardián;
+        sus ids ``EMP-dddd`` no cuentan como inventados
+    :type question: str
     :return: Respuesta revisada
     :rtype: Review
     """
     cleaned = redact(answer)
-    blocked = mentions_unknown_employee(cleaned.text, directory)
+    blocked = mentions_unknown_employee(
+        cleaned.text, directory, employee_ids(question)
+    )
     text = UNVERIFIED_ANSWER if blocked else cleaned.text
     return Review(
         answer=text[:max_chars],

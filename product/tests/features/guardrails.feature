@@ -31,13 +31,21 @@ Feature: Guardrails around the agents
       | ana.lopez@example.com | [EMAIL] | email |
       | 4111 1111 1111 1111   | [CARD]  | card  |
 
-  Scenario: An answer with an unknown employee id is replaced by the verification message
-    Given the guarded HR assistant is running
-    When I ask "¿Quién es EMP-9999?"
+  Scenario: An answer with an employee id invented by the model is replaced
+    Given the guarded HR assistant is running with a model that invents "EMP-0777"
+    When I ask "¿Quién es EMP-0001?"
     Then the response status is 200
     And the answer is "No pude verificar la respuesta con el directorio. Intenta de nuevo."
     And the audit records the blocked output for "unknown_employee_id"
     And the metrics count 1 blocked output
+
+  Scenario: An unknown employee id written by the person is not blocked
+    Given the guarded HR assistant is running
+    When I ask "¿Quién es EMP-9999?"
+    Then the response status is 200
+    And the answer mentions "No existe un empleado con id EMP-9999"
+    And the audit records no blocked output
+    And the metrics count 0 blocked output
 
   Scenario: Only metrics clients read the metrics
     Given the guarded HR assistant is running for "tester" and the metrics client "admin"
