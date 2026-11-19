@@ -5,11 +5,11 @@ respaldo) -> revisor. Este módulo arma el resultado (``AskOutcome``) con los
 tokens y el costo de todas las llamadas, escribe ``audit`` y ``agent_run`` y
 suma las métricas.
 
-Los métodos marcados con «Punto de conexión» son los que completan los agentes
-siguientes, sin cambiar la firma:
+``_guard`` (prompt injection y PII de entrada) y ``_review`` (PII de salida,
+ids inexistentes y recorte) ya están completos. Los métodos marcados con
+«Punto de conexión» son los que completan los agentes siguientes, sin cambiar
+la firma:
 
-- ``security``: ``_guard`` (prompt injection y PII de entrada) y ``_review``
-  (PII de salida, ids inexistentes y recorte).
 - ``costs``: ``_cache_lookup`` y ``_cache_store`` (caché de respuestas) y
   ``_run_specialist`` (respaldo con el otro modelo).
 - ``observability``: ``_record`` (contadores de negocio) y las trazas de
@@ -17,10 +17,17 @@ siguientes, sin cambiar la firma:
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.costs import COST_DECIMALS
+from app.guard import InputBlocked, inspect
 from app.levers import choose_model, trim_history
+from app.metrics import BLOCKED_INPUTS, OUTPUT_BLOCKED, PII_REDACTIONS
+from app.reviewer import BLOCK_REASON as REVIEW_BLOCK_REASON
+from app.reviewer import review
 
+LOCATION_INPUT = "input"
+LOCATION_OUTPUT = "output"
 AGENT_GUARD = "guard"
 AGENT_SUPERVISOR = "supervisor"
 AGENT_REVIEWER = "reviewer"
@@ -75,7 +82,7 @@ class SpecialistRun:
     :type fallback: bool
     """
 
-    result: object
+    result: Any
     model: str
     fallback: bool = False
 
@@ -339,13 +346,12 @@ class AskPipeline:
         ) + prices.cost(run.model, run.result.completions)
         return round(total, COST_DECIMALS)
 
-    # pylint: disable-next=unused-argument
     def _guard(self, request_id, client, question, history):
         """Guardián de entrada.
 
-        Punto de conexión (security): bloquear prompt injection con
-        ``InputBlocked`` (antes de llamar a cualquier modelo), redactar PII de
-        la pregunta y del historial y escribir sus ``audit``.
+        Bloquea prompt injection con ``InputBlocked`` antes de llamar a
+        cualquier modelo y redacta la PII de la pregunta y del historial. El
+        ``audit`` lleva solo motivo, tipos y conteo: nunca el texto.
 
         :param request_id: Id de la petición
         :type request_id: str
@@ -357,8 +363,52 @@ class AskPipeline:
         :type history: list[dict]
         :return: Entrada revisada
         :rtype: GuardedInput
+        :raises app.guard.InputBlocked: Si hay prompt injection
         """
-        return GuardedInput(question=question, history=history)
+        deps = self._deps
+        try:
+            result = inspect(question, history)
+        except InputBlocked as blocked:
+            deps.logger.emit(
+                "audit",
+                request_id,
+                client=client,
+                action="input_blocked",
+                reason=blocked.reason,
+            )
+            deps.metrics.add_security(BLOCKED_INPUTS)
+            raise
+        self._audit_pii(request_id, client, LOCATION_INPUT, result)
+        return GuardedInput(
+            question=result.question,
+            history=result.history,
+            pii_types=tuple(result.types),
+        )
+
+    def _audit_pii(self, request_id, client, location, redaction):
+        """Escribe el ``audit`` de PII y suma el contador, si hubo PII.
+
+        :param request_id: Id de la petición
+        :type request_id: str
+        :param client: Nombre del cliente que pregunta
+        :type client: str
+        :param location: ``input`` u ``output``
+        :type location: str
+        :param redaction: Resultado con ``types`` y ``count``
+        :type redaction: app.guard.GuardResult or app.reviewer.Review
+        """
+        if not redaction.count:
+            return
+        self._deps.logger.emit(
+            "audit",
+            request_id,
+            client=client,
+            action="pii_redacted",
+            location=location,
+            types=list(redaction.types),
+            count=redaction.count,
+        )
+        self._deps.metrics.add_security(PII_REDACTIONS, redaction.count)
 
     def _cache_lookup(self, guarded):  # pylint: disable=unused-argument
         """Busca la respuesta en la caché de respuestas.
@@ -406,13 +456,12 @@ class AskPipeline:
         result = agent.run(messages, model=self._deps.models[model_name])
         return SpecialistRun(result=result, model=model_name)
 
-    # pylint: disable-next=unused-argument
     def _review(self, request_id, client, answer):
         """Revisor de salida.
 
-        Punto de conexión (security): redactar PII de la respuesta, reemplazar
-        respuestas con ids ``EMP-dddd`` inexistentes y escribir sus ``audit``.
-        Por ahora solo recorta a ``MAX_ANSWER_CHARS``.
+        Redacta la PII de la respuesta, reemplaza las que citan ids
+        ``EMP-dddd`` inexistentes y recorta a ``MAX_ANSWER_CHARS``. El
+        ``audit`` lleva solo tipos, conteo y motivo: nunca la respuesta.
 
         :param request_id: Id de la petición
         :type request_id: str
@@ -423,7 +472,23 @@ class AskPipeline:
         :return: Respuesta revisada
         :rtype: ReviewedAnswer
         """
-        return ReviewedAnswer(answer=answer[: self._deps.settings.max_answer_chars])
+        deps = self._deps
+        result = review(answer, deps.directory, deps.settings.max_answer_chars)
+        self._audit_pii(request_id, client, LOCATION_OUTPUT, result)
+        if result.blocked:
+            deps.logger.emit(
+                "audit",
+                request_id,
+                client=client,
+                action="output_blocked",
+                reason=REVIEW_BLOCK_REASON,
+            )
+            deps.metrics.add_security(OUTPUT_BLOCKED)
+        return ReviewedAnswer(
+            answer=result.answer,
+            pii_types=tuple(result.types),
+            blocked=result.blocked,
+        )
 
     def _record(self, request_id, client, payload, outcome):
         """Escribe ``audit`` por herramienta y ``agent_run``; suma métricas.

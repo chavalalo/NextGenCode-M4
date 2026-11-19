@@ -95,8 +95,8 @@ el dato que hay que pasar a soporte.
 | `GET /` | no | Página web |
 | `GET /health` | no | `{"status": "ok", "pid": ...}` |
 | `GET /docs` | no | Documentación de la API |
-| `POST /ask` | sí | Recibe `{"question", "history"}` y responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
-| `GET /metrics` | sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens`, `slo` y `cost_usd` acumulado de este proceso |
+| `POST /ask` | sí | Recibe `{"question", "history"}` y responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd`; `400` si el guardián bloquea la entrada |
+| `GET /metrics` | sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens`, `slo`, `cost_usd` acumulado de este proceso y `security` (`blocked_inputs`, `pii_redactions`, `output_blocked`, `access_denied`); `403` si `METRICS_CLIENTS` no nombra al cliente |
 
 ## Seguridad
 
@@ -112,13 +112,41 @@ el dato que hay que pasar a soporte.
   las peticiones rechazadas no cuentan. El límite vive en la memoria del proceso: con
   varios workers se multiplica, por eso se corre con uno solo.
 - **Compliance.** Con `ENVIRONMENT=production` el producto se niega a arrancar con el
-  modelo simulado, sin clientes, con una clave de menos de 16 caracteres o con trazas
-  pedidas sin `HIDE_INPUTS=true` y `HIDE_OUTPUTS=true`. La lista de reglas, dónde
-  están y cómo se comprueban está en `doc/compliance-checklist.md`.
+  modelo simulado, sin clientes, con una clave de menos de 16 caracteres, con trazas
+  pedidas sin `HIDE_INPUTS=true` y `HIDE_OUTPUTS=true`, o con `METRICS_CLIENTS` vacía
+  o con un cliente que no está en `API_KEYS`. La lista de reglas, dónde están y cómo
+  se comprueban está en `doc/compliance-checklist.md`.
+- **Guardián de entrada** (`app/guard.py`, en código, antes de cualquier modelo). Si
+  la pregunta o un mensaje `user` del historial pide ignorar u olvidar instrucciones,
+  revelar el prompt del sistema o cambiar de rol («ignora las instrucciones», «ignore
+  previous instructions», «revela tu prompt», «system prompt», «actúa como», «modo
+  desarrollador», «jailbreak», sin importar acentos ni mayúsculas), `POST /ask`
+  responde `400 {"detail": "request blocked by input policy", "request_id": ...}`.
+  Los mensajes `assistant` no bloquean. Orden de rechazos: `401`, `429`, `422`, `400`.
+- **Datos personales** (`app/pii.py`). Correo, teléfono de 10 dígitos (con o sin
+  `+52`), CURP, RFC, tarjeta de 13 a 19 dígitos que pasa Luhn y NSS de 11 dígitos se
+  reemplazan por `[EMAIL]`, `[PHONE]`, `[CURP]`, `[RFC]`, `[CARD]` y `[NSS]` en la
+  pregunta y el historial (antes del modelo, el log y la traza) y en la respuesta. Los
+  tipos ocultados salen en `pii_redacted`. Los ids `EMP-dddd` nunca son PII.
+- **Revisor de salida** (`app/reviewer.py`). Oculta la PII de la respuesta; si cita un
+  id `EMP-dddd` que no existe, la reemplaza por «No pude verificar la respuesta con el
+  directorio. Intenta de nuevo.»; al final la recorta a `MAX_ANSWER_CHARS`.
+- **Mínimo privilegio.** Con `METRICS_CLIENTS` con valor, solo esos clientes leen
+  `GET /metrics`; otro cliente con clave válida recibe `403 {"detail": "forbidden"}`.
+  Vacía, todos los clientes pueden leerlas (solo para desarrollo).
+- **Auditoría.** Líneas `audit` con `client` y `action`: `tool_call`, `input_blocked`
+  (`reason: prompt_injection`), `pii_redacted` (`location`: `input` u `output`,
+  `types` y `count`), `output_blocked` (`reason: unknown_employee_id`),
+  `access_denied` (`path`) y `metrics_read`. Nunca el texto de la pregunta, de la
+  respuesta ni el valor de un dato personal.
+- **AI Gateway autenticado.** Si `CF_AIG_TOKEN` tiene valor, cada llamada al gateway
+  manda `cf-aig-authorization: Bearer <token>`. El token no sale en `repr`, el log, la
+  traza ni un error.
 - **Página.** La clave se escribe en el campo «Clave de acceso» (tipo contraseña), se
   guarda solo en `sessionStorage` (se borra al cerrar la pestaña) y se manda en
   `X-API-Key`. Con `401` la página muestra «Clave inválida»; con `429`, «Demasiadas
-  preguntas; espera N segundos».
+  preguntas; espera N segundos»; con `400`, que la pregunta fue bloqueada. Cada
+  respuesta del asistente lleva `data-testid="assistant-answer"`.
 - La clave nunca se escribe en el log, en la traza ni en un mensaje de error: solo el
   nombre del cliente.
 
@@ -133,7 +161,7 @@ Una línea JSON por evento en la salida estándar, con `ts` (UTC), `service`, `e
 `request_id`. Eventos: `request` (con `client`, o `null` en rutas públicas y
 rechazos), `agent_run` (`client`, conteos, `model`, `route`, `history_sent`,
 `cached_calls` y `cost_usd`; nunca el texto de la pregunta ni de la respuesta), `audit`
-(una por herramienta llamada, con `client`), `auth_rejected` (`reason`: `missing` o
+(con `client` y `action`; las acciones están en «Seguridad»), `auth_rejected` (`reason`: `missing` o
 `invalid`), `rate_limited` (`client` y `retry_after`) y `error` (solo el tipo de error,
 por ejemplo `ModelUnavailable`). Las trazas de LangSmith llevan `request_id` y `client`
 en sus metadatos.
@@ -157,6 +185,9 @@ en sus metadatos.
 | `CF_ACCOUNT_ID` | vacía | Cuenta de Cloudflare (obligatoria con `gateway`) |
 | `CF_GATEWAY_ID` | `default` | Gateway de AI Gateway (obligatorio con `gateway`) |
 | `CF_API_TOKEN` | vacía | Token de Cloudflare, secreto (obligatorio con `gateway`) |
+| `CF_AIG_TOKEN` | vacía | Token de AI Gateway autenticado, secreto y opcional; va en `cf-aig-authorization` |
+| `METRICS_CLIENTS` | vacía | Clientes de `API_KEYS` que leen `GET /metrics`; vacía: todos; obligatoria en `production` |
+| `MAX_ANSWER_CHARS` | `1500` | Largo máximo de la respuesta (entero mayor que 0) |
 | `MODEL_SMALL` | `@cf/meta/llama-3.1-8b-instruct-fast` | Modelo barato |
 | `MODEL_LARGE` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Modelo capaz |
 | `ROUTING` | `true` | Enrutamiento por pregunta (`true` o `false`) |

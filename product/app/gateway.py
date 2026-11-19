@@ -21,6 +21,7 @@ GATEWAY_TIMEOUT_SECONDS = 30
 CACHE_TTL_HEADER = "cf-aig-cache-ttl"
 CACHE_STATUS_HEADER = "cf-aig-cache-status"
 CACHE_HIT = "HIT"
+AIG_AUTH_HEADER = "cf-aig-authorization"
 CODE_FENCE_PATTERN = re.compile(r"^```[A-Za-z]*\s*(.*?)\s*```$", re.DOTALL)
 SYSTEM_ROLE = "system"
 # Prompt por omisión: el del especialista de directorio (sesiones 1 a 4).
@@ -97,12 +98,17 @@ class GatewayModel:  # pylint: disable=too-few-public-methods
         )
 
     def _headers(self):
-        """Arma los encabezados: token y, si aplica, la vida de la caché.
+        """Arma los encabezados: token, ``CF_AIG_TOKEN`` y vida de la caché.
+
+        ``cf-aig-authorization`` solo va si ``CF_AIG_TOKEN`` tiene valor.
 
         :return: Encabezados de la petición
         :rtype: dict
         """
         headers = {"Authorization": f"Bearer {self._settings.cf_api_token}"}
+        if self._settings.cf_aig_token:
+            # Gateway autenticado: el token solo viaja en este encabezado.
+            headers[AIG_AUTH_HEADER] = f"Bearer {self._settings.cf_aig_token}"
         if self._settings.cache_ttl_seconds > 0:
             headers[CACHE_TTL_HEADER] = str(self._settings.cache_ttl_seconds)
         return headers

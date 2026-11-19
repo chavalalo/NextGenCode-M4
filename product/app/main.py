@@ -7,7 +7,9 @@ Cada petición lleva un id (``X-Request-ID``), deja una línea JSON en el log y
 se cuenta en las métricas del proceso. ``POST /ask`` y ``GET /metrics`` piden
 la clave del cliente en ``X-API-Key`` y respetan su límite por minuto.
 ``POST /ask`` delega en ``app.pipeline.AskPipeline`` (guardián, caché,
-supervisor, especialista y revisor).
+supervisor, especialista y revisor) y responde 400 si el guardián bloquea la
+entrada. ``GET /metrics`` responde 403 a los clientes fuera de
+``METRICS_CLIENTS``.
 """
 
 import os
@@ -21,16 +23,17 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app.auth import identify_client
+from app.auth import can_read_metrics, identify_client
 from app.clock import SystemClock
 from app.compliance import enforce
 from app.config import ConfigError, Settings
 from app.costs import PriceTable
 from app.directory import EmployeeDirectory
 from app.gateway import ModelUnavailable
+from app.guard import InputBlocked
 from app.llm import build_models
 from app.logs import JsonLogger
-from app.metrics import Metrics
+from app.metrics import ACCESS_DENIED, Metrics
 from app.pipeline import AskPipeline, PipelineDependencies
 from app.policies import PolicyBook
 from app.ratelimit import RateLimiter
@@ -54,6 +57,10 @@ READY_ERROR = "error"
 INTERNAL_ERROR_DETAIL = "internal error"
 MODEL_UNAVAILABLE_STATUS = 502
 MODEL_UNAVAILABLE_DETAIL = "model unavailable"
+BLOCKED_STATUS = 400
+BLOCKED_DETAIL = "request blocked by input policy"
+FORBIDDEN_STATUS = 403
+FORBIDDEN_DETAIL = "forbidden"
 
 
 class HistoryMessage(BaseModel):
@@ -388,11 +395,31 @@ def _add_routes(application, runtime):
             content={"status": "not_ready", "checks": checks},
         )
 
-    @application.get("/metrics", dependencies=[Depends(require_client)])
-    def metrics():
-        """Devuelve las métricas de este proceso con el costo acumulado."""
+    @application.get("/metrics")
+    def metrics(request: Request, client: str = Depends(require_client)):
+        """Devuelve las métricas de este proceso con el costo acumulado.
+
+        Orden: 401 -> 429 -> 403 si ``METRICS_CLIENTS`` no nombra al cliente.
+        """
+        request_id = request.state.request_id
+        if not can_read_metrics(client, runtime.settings.metrics_clients):
+            runtime.logger.emit(
+                "audit",
+                request_id,
+                client=client,
+                action="access_denied",
+                path=request.url.path,
+            )
+            runtime.metrics.add_security(ACCESS_DENIED)
+            return JSONResponse(
+                status_code=FORBIDDEN_STATUS, content={"detail": FORBIDDEN_DETAIL}
+            )
+        runtime.logger.emit(
+            "audit", request_id, client=client, action="metrics_read"
+        )
         snapshot = runtime.metrics.snapshot(os.getpid())
         snapshot["cost_usd"] = runtime.metrics.cost_usd()
+        snapshot["security"] = runtime.metrics.security()
         return snapshot
 
     @application.post("/ask", response_model=AskResponse)
@@ -406,6 +433,12 @@ def _add_routes(application, runtime):
         try:
             outcome = runtime.pipeline.answer(request_id, client, payload)
             return AskResponse(request_id=request_id, **outcome.response_fields())
+        except InputBlocked:
+            # El pipeline ya escribió el audit; el cuerpo nunca repite el texto.
+            return JSONResponse(
+                status_code=BLOCKED_STATUS,
+                content={"detail": BLOCKED_DETAIL, "request_id": request_id},
+            )
         except ModelUnavailable as error:
             # Solo el tipo: nunca la URL (con la cuenta) ni el token.
             runtime.logger.emit("error", request_id, error_type=type(error).__name__)

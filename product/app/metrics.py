@@ -8,6 +8,11 @@ from app.costs import COST_DECIMALS
 
 LATENCY_WINDOW = 1000
 SERVER_ERROR_STATUS = 500
+BLOCKED_INPUTS = "blocked_inputs"
+PII_REDACTIONS = "pii_redactions"
+OUTPUT_BLOCKED = "output_blocked"
+ACCESS_DENIED = "access_denied"
+SECURITY_COUNTERS = (BLOCKED_INPUTS, PII_REDACTIONS, OUTPUT_BLOCKED, ACCESS_DENIED)
 
 
 def nearest_rank(sorted_values, percentile):
@@ -26,7 +31,7 @@ def nearest_rank(sorted_values, percentile):
     return float(sorted_values[rank - 1])
 
 
-class Metrics:
+class Metrics:  # pylint: disable=too-many-instance-attributes
     """Cuenta peticiones, errores, latencias, tokens y costo de este proceso.
 
     ``snapshot`` conserva el formato de la sesión 2; ``GET /metrics`` le agrega
@@ -45,6 +50,7 @@ class Metrics:
         self._errors = 0
         self._tokens = {"input": 0, "output": 0}
         self._cost_usd = 0.0
+        self._security = dict.fromkeys(SECURITY_COUNTERS, 0)
         self._lock = threading.Lock()
 
     def record_request(self, latency_ms, status):
@@ -81,6 +87,28 @@ class Metrics:
         """
         with self._lock:
             self._cost_usd += cost_usd
+
+    def add_security(self, counter, amount=1):
+        """Suma a un contador de seguridad.
+
+        :param counter: Uno de ``SECURITY_COUNTERS``
+        :type counter: str
+        :param amount: Cuánto sumar (``pii_redactions`` suma valores ocultados)
+        :type amount: int
+        :raises KeyError: Si el contador no existe
+        """
+        with self._lock:
+            self._security[counter] += amount
+
+    def security(self):
+        """Devuelve los contadores de seguridad de este proceso.
+
+        :return: ``blocked_inputs``, ``pii_redactions``, ``output_blocked`` y
+            ``access_denied``
+        :rtype: dict[str, int]
+        """
+        with self._lock:
+            return dict(self._security)
 
     def cost_usd(self):
         """Devuelve el costo acumulado de este proceso.
