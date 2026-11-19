@@ -125,7 +125,7 @@ def test_questions_with_history_or_pii_skip_the_cache(api_cached):
 
 
 def test_the_small_model_answers_when_the_large_one_is_down(api_large_down):
-    body = ask(api_large_down, "Compara a los empleados del departamento de Finanzas")
+    body = ask(api_large_down, "Compara a los empleados del departamento de Finanzas").json()
     assert body["fallback"] is True
     assert body["model"] == SMALL
 

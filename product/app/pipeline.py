@@ -5,15 +5,17 @@ respaldo) -> revisor. Este módulo arma el resultado (``AskOutcome``) con los
 tokens y el costo de todas las llamadas, escribe ``audit`` y ``agent_run`` y
 suma las métricas.
 
-``_guard`` (prompt injection y PII de entrada), ``_review`` (PII de salida,
-ids inexistentes y recorte), ``_cache_lookup`` y ``_cache_store`` (caché de
-respuestas) y ``_run_specialist`` (respaldo con el otro modelo) ya están
-completos. Los métodos marcados con «Punto de conexión» son los que completa
-``observability`` sin cambiar la firma: ``_record`` (contadores de negocio) y
-las trazas de ``agent.guard``, ``agent.supervisor`` y ``agent.reviewer``.
+Trazas: la petición es el run raíz ``request`` y cada agente es su propio run
+dentro de él (``agent.guard``, ``agent.supervisor``, ``agent.directory`` o
+``agent.policy`` y ``agent.reviewer``), con ``request_id``, ``client`` y, desde
+que el supervisor decide, ``specialist`` en los metadatos. El run raíz y los de
+guardián, supervisor y revisor no tienen entradas y su salida es un resumen
+(tipos, conteos y decisiones): el texto de la persona nunca llega a la traza
+por ellos. El especialista recibe solo texto ya redactado.
 """
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from app.agent import STOPPED_ANSWER
@@ -22,10 +24,18 @@ from app.costs import COST_DECIMALS
 from app.gateway import ModelUnavailable
 from app.guard import InputBlocked, inspect
 from app.levers import choose_model, trim_history
-from app.metrics import BLOCKED_INPUTS, OUTPUT_BLOCKED, PII_REDACTIONS
+from app.metrics import (
+    BLOCKED_INPUTS,
+    OUTPUT_BLOCKED,
+    PII_REDACTIONS,
+    SUPERVISOR_MODEL,
+    SUPERVISOR_RULE,
+)
 from app.resilience import run_with_fallback
 from app.reviewer import BLOCK_REASON as REVIEW_BLOCK_REASON
 from app.reviewer import review
+from app.supervisor import RULE_ROUTES
+from app.tracing import TRACE_REQUEST, agent_trace_name, run_traced
 
 LOCATION_INPUT = "input"
 LOCATION_OUTPUT = "output"
@@ -217,6 +227,89 @@ def _audit_args(args):
     }
 
 
+def _guard_summary(guarded):
+    """Salida de la traza ``agent.guard``: solo tipos y conteos.
+
+    :param guarded: Entrada ya revisada por el guardián
+    :type guarded: GuardedInput
+    :return: Tipos de PII ocultados y mensajes de historial
+    :rtype: dict
+    """
+    return {
+        "pii_types": list(guarded.pii_types),
+        "history_messages": len(guarded.history),
+    }
+
+
+def _decision_summary(decision):
+    """Salida de la traza ``agent.supervisor``: especialista y motivo.
+
+    :param decision: Decisión del supervisor
+    :type decision: app.supervisor.Decision
+    :return: Especialista, motivo y llamadas al modelo
+    :rtype: dict
+    """
+    return {
+        "specialist": decision.specialist,
+        "supervisor_route": decision.route,
+        "model_calls": len(decision.completions),
+    }
+
+
+def _review_summary(reviewed):
+    """Salida de la traza ``agent.reviewer``: tipos, bloqueo y largo.
+
+    :param reviewed: Respuesta ya revisada
+    :type reviewed: ReviewedAnswer
+    :return: Tipos de PII ocultados, si se bloqueó y largo de la respuesta
+    :rtype: dict
+    """
+    return {
+        "pii_types": list(reviewed.pii_types),
+        "output_blocked": reviewed.blocked,
+        "answer_chars": len(reviewed.answer),
+    }
+
+
+def _outcome_summary(outcome):
+    """Salida del run raíz ``request``: conteos, modelo y costo, sin texto.
+
+    :param outcome: Resultado de la pregunta
+    :type outcome: AskOutcome
+    :return: Especialista, agentes, motivo, tokens, costo y banderas
+    :rtype: dict
+    """
+    return {
+        "specialist": outcome.specialist,
+        "agents": list(outcome.agents),
+        "supervisor_route": outcome.supervisor_route,
+        "model": outcome.model,
+        "steps": outcome.steps,
+        "input_tokens": outcome.input_tokens,
+        "output_tokens": outcome.output_tokens,
+        "cost_usd": outcome.cost_usd,
+        "pii_redacted": list(outcome.pii_redacted),
+        "cached": outcome.cached,
+        "fallback": outcome.fallback,
+    }
+
+
+def _supervisor_kind(outcome):
+    """Quién decidió el especialista, para el contador ``supervisor``.
+
+    :param outcome: Resultado de la pregunta
+    :type outcome: AskOutcome
+    :return: ``rule``, ``model`` (también ``model_invalid``) o ``None`` si el
+        supervisor no corrió (acierto de caché)
+    :rtype: str or None
+    """
+    if AGENT_SUPERVISOR not in outcome.agents:
+        return None
+    if outcome.supervisor_route in RULE_ROUTES:
+        return SUPERVISOR_RULE
+    return SUPERVISOR_MODEL
+
+
 def _sum_tokens(completions):
     """Suma tokens y llamadas cacheadas de varias llamadas al modelo.
 
@@ -298,12 +391,41 @@ class AskPipeline:
         deps = self._deps
         history = [message.model_dump() for message in payload.history]
         with deps.tracer.context(request_id, client=client):
-            guarded = self._guard(request_id, client, payload.question, history)
-            outcome = self._cache_lookup(guarded)
-            if outcome is None:
-                outcome = self._answer_with_agents(request_id, client, guarded)
-                self._cache_store(guarded, outcome)
+            outcome = run_traced(
+                deps.tracer,
+                TRACE_REQUEST,
+                partial(self._run, request_id, client, payload.question, history),
+                _outcome_summary,
+            )
         self._record(request_id, client, payload, outcome)
+        return outcome
+
+    def _run(self, request_id, client, question, history):
+        """Cuerpo del run raíz: guardián, caché y, si no hay acierto, agentes.
+
+        :param request_id: Id de la petición
+        :type request_id: str
+        :param client: Nombre del cliente que pregunta
+        :type client: str
+        :param question: Pregunta original
+        :type question: str
+        :param history: Historial original
+        :type history: list[dict]
+        :return: Resultado de la pregunta
+        :rtype: AskOutcome
+        :raises app.guard.InputBlocked: Si hay prompt injection
+        :raises app.gateway.ModelUnavailable: Si ningún modelo contesta
+        """
+        guarded = run_traced(
+            self._deps.tracer,
+            agent_trace_name(AGENT_GUARD),
+            partial(self._guard, request_id, client, question, history),
+            _guard_summary,
+        )
+        outcome = self._cache_lookup(guarded)
+        if outcome is None:
+            outcome = self._answer_with_agents(request_id, client, guarded)
+            self._cache_store(guarded, outcome)
         return outcome
 
     def _answer_with_agents(self, request_id, client, guarded):
@@ -321,16 +443,34 @@ class AskPipeline:
         """
         deps = self._deps
         settings = deps.settings
-        decision = deps.supervisor.route(guarded.question)
+        decision = run_traced(
+            deps.tracer,
+            agent_trace_name(AGENT_SUPERVISOR),
+            partial(deps.supervisor.route, guarded.question),
+            _decision_summary,
+        )
         route = choose_model(guarded.question, settings)
         history = trim_history(guarded.history, settings.history_window)
         messages = history + [{"role": USER_ROLE, "content": guarded.question}]
-        run = self._run_specialist(
-            deps.specialists[decision.specialist], messages, route.model
-        )
-        reviewed = self._review(
-            request_id, client, run.result.answer, guarded.question
-        )
+        # Desde aquí los runs llevan también el especialista en sus metadatos.
+        with deps.tracer.context(
+            request_id, client=client, specialist=decision.specialist
+        ):
+            run = self._run_specialist(
+                deps.specialists[decision.specialist], messages, route.model
+            )
+            reviewed = run_traced(
+                deps.tracer,
+                agent_trace_name(AGENT_REVIEWER),
+                partial(
+                    self._review,
+                    request_id,
+                    client,
+                    run.result.answer,
+                    guarded.question,
+                ),
+                _review_summary,
+            )
         input_tokens, output_tokens, cached_calls = _sum_tokens(
             list(decision.completions) + list(run.result.completions)
         )
@@ -600,8 +740,11 @@ class AskPipeline:
         """Escribe ``audit`` por herramienta y ``agent_run``; suma métricas.
 
         Solo conteos, tipos, modelo y costo: nunca el texto de la pregunta ni
-        de la respuesta. Punto de conexión (observability): contadores por
-        especialista, cliente, caché, supervisor y respaldo.
+        de la respuesta. Se llama solo con respuestas ``200`` (también las de
+        caché): suma tokens, costo, peticiones y costo por especialista y por
+        cliente, y quién decidió el especialista (``rule`` o ``model``). La
+        caché y el respaldo ya se cuentan donde ocurren (``_cache_lookup`` y
+        ``_run_specialist``).
 
         :param request_id: Id de la petición
         :type request_id: str
@@ -645,5 +788,4 @@ class AskPipeline:
             cached=outcome.cached,
             fallback=outcome.fallback,
         )
-        deps.metrics.add_tokens(outcome.input_tokens, outcome.output_tokens)
-        deps.metrics.add_cost(outcome.cost_usd)
+        deps.metrics.record_answer(client, outcome, _supervisor_kind(outcome))

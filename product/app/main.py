@@ -9,7 +9,8 @@ la clave del cliente en ``X-API-Key`` y respetan su límite por minuto.
 ``POST /ask`` delega en ``app.pipeline.AskPipeline`` (guardián, caché,
 supervisor, especialista y revisor) y responde 400 si el guardián bloquea la
 entrada. ``GET /metrics`` responde 403 a los clientes fuera de
-``METRICS_CLIENTS``.
+``METRICS_CLIENTS``. ``GET /dashboard`` sirve el tablero, sin datos ni clave:
+la página pide la clave y lee ``/metrics`` desde el navegador.
 """
 
 import os
@@ -42,7 +43,9 @@ from app.specialists import build_specialists
 from app.supervisor import Supervisor
 from app.tracing import build_tracer
 
-INDEX_PATH = Path(__file__).resolve().parent / "static" / "index.html"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_PATH = STATIC_DIR / "index.html"
+DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
 REQUEST_ID_HEADER = "X-Request-ID"
 API_KEY_HEADER = "X-API-Key"
 RETRY_AFTER_HEADER = "Retry-After"
@@ -158,6 +161,8 @@ class _Runtime:  # pylint: disable=too-many-instance-attributes
     :type ask_request: type
     :param index_html: Página web
     :type index_html: str
+    :param dashboard_html: Tablero de métricas (sin datos ni clave)
+    :type dashboard_html: str
     :param limiter: Límite de peticiones por cliente
     :type limiter: app.ratelimit.RateLimiter
     """
@@ -173,6 +178,7 @@ class _Runtime:  # pylint: disable=too-many-instance-attributes
     metrics: Metrics
     ask_request: type
     index_html: str
+    dashboard_html: str
     limiter: RateLimiter
 
 
@@ -364,8 +370,8 @@ def _client_dependency(runtime):
 def _add_routes(application, runtime):
     """Registra las rutas de la API.
 
-    ``/``, ``/health`` y ``/ready`` son públicas; ``/ask`` y ``/metrics`` piden
-    clave.
+    ``/``, ``/dashboard``, ``/health`` y ``/ready`` son públicas; ``/ask`` y
+    ``/metrics`` piden clave.
 
     :param application: Aplicación FastAPI
     :type application: fastapi.FastAPI
@@ -379,6 +385,14 @@ def _add_routes(application, runtime):
     def home():
         """Sirve la página web."""
         return HTMLResponse(runtime.index_html)
+
+    @application.get("/dashboard", response_class=HTMLResponse)
+    def dashboard():
+        """Sirve el tablero: HTML estático, sin datos ni clave.
+
+        La página pide la clave y lee ``/metrics`` desde el navegador.
+        """
+        return HTMLResponse(runtime.dashboard_html)
 
     @application.get("/health")
     def health():
@@ -398,8 +412,10 @@ def _add_routes(application, runtime):
 
     @application.get("/metrics")
     def metrics(request: Request, client: str = Depends(require_client)):
-        """Devuelve las métricas de este proceso con el costo acumulado.
+        """Devuelve las métricas de este proceso: operativas y de negocio.
 
+        Agrega al formato de la sesión 2 el costo acumulado, ``by_specialist``,
+        ``by_client``, ``security``, ``cache``, ``fallbacks`` y ``supervisor``.
         Orden: 401 -> 429 -> 403 si ``METRICS_CLIENTS`` no nombra al cliente.
         """
         request_id = request.state.request_id
@@ -420,6 +436,7 @@ def _add_routes(application, runtime):
         )
         snapshot = runtime.metrics.snapshot(os.getpid())
         snapshot["cost_usd"] = runtime.metrics.cost_usd()
+        snapshot.update(runtime.metrics.business())
         snapshot["security"] = runtime.metrics.security()
         snapshot["cache"] = runtime.metrics.cache()
         snapshot["fallbacks"] = runtime.metrics.fallbacks()
@@ -596,6 +613,7 @@ def create_app(
         metrics=dependencies.metrics,
         ask_request=_build_ask_request(settings.max_question_chars),
         index_html=INDEX_PATH.read_text(encoding="utf-8"),
+        dashboard_html=DASHBOARD_PATH.read_text(encoding="utf-8"),
         limiter=RateLimiter(settings.rate_limit_per_minute, clock),
     )
 

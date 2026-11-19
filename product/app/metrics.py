@@ -1,4 +1,8 @@
-"""Métricas operativas en memoria de este proceso (no son estado de negocio)."""
+"""Métricas en memoria de este proceso: operativas, de negocio y de seguridad.
+
+Son contadores que se pierden al reiniciar: no guardan preguntas, respuestas
+ni datos de empleados.
+"""
 
 import math
 import threading
@@ -13,6 +17,35 @@ PII_REDACTIONS = "pii_redactions"
 OUTPUT_BLOCKED = "output_blocked"
 ACCESS_DENIED = "access_denied"
 SECURITY_COUNTERS = (BLOCKED_INPUTS, PII_REDACTIONS, OUTPUT_BLOCKED, ACCESS_DENIED)
+SUPERVISOR_RULE = "rule"
+SUPERVISOR_MODEL = "model"
+SUPERVISOR_COUNTERS = (SUPERVISOR_RULE, SUPERVISOR_MODEL)
+
+
+def _empty_tally():
+    """Contador nuevo de un especialista o un cliente.
+
+    :return: ``requests`` en 0 y ``cost_usd`` en 0.0
+    :rtype: dict
+    """
+    return {"requests": 0, "cost_usd": 0.0}
+
+
+def _rounded_tallies(tallies):
+    """Copia los contadores por nombre con el costo redondeado.
+
+    :param tallies: Contadores por nombre
+    :type tallies: dict[str, dict]
+    :return: Copia con ``cost_usd`` redondeado a ``COST_DECIMALS``
+    :rtype: dict[str, dict]
+    """
+    return {
+        name: {
+            "requests": tally["requests"],
+            "cost_usd": round(tally["cost_usd"], COST_DECIMALS),
+        }
+        for name, tally in sorted(tallies.items())
+    }
 
 
 def nearest_rank(sorted_values, percentile):
@@ -35,7 +68,9 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
     """Cuenta peticiones, errores, latencias, tokens y costo de este proceso.
 
     ``snapshot`` conserva el formato de la sesión 2; ``GET /metrics`` le agrega
-    el costo acumulado de ``cost_usd()``.
+    el costo acumulado de ``cost_usd()``, ``business()`` (por especialista, por
+    cliente y supervisor), ``security()``, ``cache()`` y ``fallbacks()``. Cada
+    contador se lee y se escribe bajo el mismo candado.
 
     :param slo_p95_ms: Meta de latencia p95 en milisegundos
     :type slo_p95_ms: int
@@ -53,6 +88,9 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         self._security = dict.fromkeys(SECURITY_COUNTERS, 0)
         self._cache = {"hits": 0, "misses": 0}
         self._fallbacks = 0
+        self._by_specialist = {}
+        self._by_client = {}
+        self._supervisor = dict.fromkeys(SUPERVISOR_COUNTERS, 0)
         self._lock = threading.Lock()
 
     def record_request(self, latency_ms, status):
@@ -150,6 +188,54 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         """
         with self._lock:
             return self._fallbacks
+
+    def record_answer(self, client, outcome, supervisor=None):
+        """Suma una respuesta ``200`` de ``POST /ask`` (también las de caché).
+
+        En una sola toma del candado suma tokens, costo total, la petición y
+        su costo por especialista y por cliente, y la decisión del supervisor.
+
+        :param client: Nombre del cliente que preguntó
+        :type client: str
+        :param outcome: Resultado con ``specialist``, ``cost_usd``,
+            ``input_tokens`` y ``output_tokens``
+        :type outcome: app.pipeline.AskOutcome
+        :param supervisor: ``rule`` o ``model`` si corrió el supervisor;
+            ``None`` si no corrió (acierto de caché)
+        :type supervisor: str or None
+        :raises KeyError: Si ``supervisor`` no es uno de ``SUPERVISOR_COUNTERS``
+        """
+        cost = outcome.cost_usd
+        with self._lock:
+            self._tokens["input"] += outcome.input_tokens
+            self._tokens["output"] += outcome.output_tokens
+            self._cost_usd += cost
+            for tallies, name in (
+                (self._by_specialist, outcome.specialist),
+                (self._by_client, client),
+            ):
+                tally = tallies.setdefault(name, _empty_tally())
+                tally["requests"] += 1
+                tally["cost_usd"] += cost
+            if supervisor is not None:
+                self._supervisor[supervisor] += 1
+
+    def business(self):
+        """Devuelve las métricas de negocio de este proceso.
+
+        :return: ``by_specialist`` y ``by_client`` (``requests`` y
+            ``cost_usd`` por nombre) y ``supervisor`` (``rule`` y ``model``)
+        :rtype: dict
+        """
+        with self._lock:
+            by_specialist = _rounded_tallies(self._by_specialist)
+            by_client = _rounded_tallies(self._by_client)
+            supervisor = dict(self._supervisor)
+        return {
+            "by_specialist": by_specialist,
+            "by_client": by_client,
+            "supervisor": supervisor,
+        }
 
     def cost_usd(self):
         """Devuelve el costo acumulado de este proceso.

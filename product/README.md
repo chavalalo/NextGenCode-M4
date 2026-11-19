@@ -1,13 +1,25 @@
 # HR Assistant
 
 Asistente que responde preguntas del personal de Recursos Humanos sobre empleados
-(por id, como `EMP-0004`, o por departamento). Es una API FastAPI sin estado con una
-página web: el historial de la conversación vive en el navegador y un solo agente, con
-un bucle con tope, consulta un directorio de empleados de solo lectura.
+(por id, como `EMP-0004`, o por departamento) y sobre las políticas de RH
+(vacaciones, home office...). Es una API FastAPI sin estado con una página web: el
+historial de la conversación vive en el navegador.
+
+Es un sistema multi-agente. Cada `POST /ask` pasa, en orden, por:
+
+1. `guard` (en código): bloquea prompt injection y oculta datos personales.
+2. `supervisor`: elige el especialista con reglas en código (`rule:employee`,
+   `rule:department`, `rule:policy`) o, si ninguna aplica, con una llamada a
+   `MODEL_SMALL` (`model`; una respuesta inválida da `model_invalid` y `directory`).
+3. Un especialista con su bucle con tope (`AGENT_MAX_STEPS`): `directory`
+   (`get_employee`, `search_by_department`) o `policy` (`search_policy` sobre
+   `data/policies.json`).
+4. `reviewer` (en código): oculta datos personales de la respuesta, bloquea ids
+   inventados y recorta a `MAX_ANSWER_CHARS`.
 
 Cada petición se puede rastrear: lleva un id (`X-Request-ID`), deja líneas JSON en la
-salida estándar y se cuenta en `GET /metrics`. Opcionalmente, las corridas del agente
-quedan como trazas en LangSmith.
+salida estándar y se cuenta en `GET /metrics`, que alimenta el tablero
+`GET /dashboard`. Opcionalmente, cada agente queda como un run en LangSmith.
 
 Cada respuesta dice qué modelo la contestó y cuánto costó. Por omisión el modelo es
 simulado (sin red y sin gastar cuota); con `MODEL_PROVIDER=gateway` usa Cloudflare
@@ -114,17 +126,78 @@ modelo simulado hay dos modelos con esos mismos nombres: responden igual, pero c
 se cobra con su precio, así que las palancas se miden sin red.
 
 Abre `http://127.0.0.1:8000/`. Cada respuesta muestra su `Id de la petición`, que es
-el dato que hay que pasar a soporte.
+el dato que hay que pasar a soporte. El tablero está en
+`http://127.0.0.1:8000/dashboard`.
 
 ## Rutas
 
 | Ruta | Clave | Para qué |
 | --- | --- | --- |
 | `GET /` | no | Página web |
-| `GET /health` | no | `{"status": "ok", "pid": ...}` |
+| `GET /dashboard` | no | Tablero de métricas; el HTML no trae datos ni clave (ver «Tablero») |
+| `GET /health` | no | `{"status": "ok", "pid": ...}`; solo dice que el proceso vive |
+| `GET /ready` | no | `200 {"status": "ready", "checks": {"directory": "ok", "policies": "ok", "prices": "ok"}}`; si un dato falla, `503` con `"status": "not_ready"` y `"error"` en ese check |
 | `GET /docs` | no | Documentación de la API |
-| `POST /ask` | sí | Recibe `{"question", "history"}` y responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls`, `cost_usd`, `cached` (caché de respuestas) y `fallback` (modelo de respaldo); `400` si el guardián bloquea la entrada; `502` si ningún modelo contesta |
-| `GET /metrics` | sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens`, `slo`, `cost_usd` acumulado de este proceso y `security` (`blocked_inputs`, `pii_redactions`, `output_blocked`, `access_denied`), `cache` (`hits`, `misses`, `hit_rate`) y `fallbacks`; `403` si `METRICS_CLIENTS` no nombra al cliente |
+| `POST /ask` | sí | Recibe `{"question", "history"}`; ver «Respuesta de `POST /ask`» |
+| `GET /metrics` | sí | Métricas de este proceso; ver «Métricas»; `403 {"detail": "forbidden"}` si `METRICS_CLIENTS` no nombra al cliente |
+
+### Respuesta de `POST /ask`
+
+| Campo | Qué es |
+| --- | --- |
+| `answer` | Respuesta en español, ya revisada |
+| `steps`, `tools_used` | Vueltas y herramientas del especialista |
+| `input_tokens`, `output_tokens` | Tokens del supervisor y del especialista |
+| `request_id` | Id de la petición, para soporte |
+| `model`, `route` | Modelo que contestó y motivo del enrutador de costo |
+| `cached_calls` | Llamadas que AI Gateway respondió desde su caché |
+| `cost_usd` | Costo del supervisor más el especialista |
+| `specialist` | `directory` o `policy` |
+| `agents` | Agentes que corrieron, en orden, por ejemplo `["guard", "supervisor", "directory", "reviewer"]` (`["guard", "cache"]` en un acierto de caché) |
+| `supervisor_route` | `rule:employee`, `rule:department`, `rule:policy`, `model` o `model_invalid` |
+| `pii_redacted` | Tipos de dato personal ocultados en la entrada o la salida, sin repetir y en orden alfabético |
+| `cached` | `true` si salió de la caché de respuestas |
+| `fallback` | `true` si respondió el modelo de respaldo |
+
+Errores: `401` sin clave válida, `429` sobre el límite, `422` cuerpo inválido, `400`
+si el guardián bloquea la entrada (en ese orden) y `502` si ningún modelo contesta.
+
+### Métricas
+
+`GET /metrics` responde, de este proceso (se pierden al reiniciar):
+
+| Clave | Qué es |
+| --- | --- |
+| `pid` | Id del proceso |
+| `requests`, `error_rate` | Peticiones HTTP y fracción con `5xx` |
+| `latency_ms` | `p50` y `p95` (rango más cercano, últimas 1000 peticiones) |
+| `tokens` | `input` y `output` acumulados |
+| `slo` | `p95_ms_target` (`SLO_P95_MS`) y `met` (`p95` por debajo de la meta) |
+| `cost_usd` | Costo acumulado en USD |
+| `by_specialist` | Por especialista: `requests` (respuestas `200`, también de caché) y `cost_usd` |
+| `by_client` | Por cliente: `requests` y `cost_usd`, igual que arriba |
+| `security` | `blocked_inputs`, `pii_redactions` (valores ocultados), `output_blocked` y `access_denied` |
+| `cache` | `hits`, `misses` y `hit_rate` = hits / (hits + misses), `0.0` sin consultas |
+| `fallbacks` | Respuestas del modelo de respaldo |
+| `supervisor` | Cuántas veces decidió una regla (`rule`) y cuántas el modelo (`model`; incluye `model_invalid`); los aciertos de caché no cuentan |
+
+Todos los contadores se suman bajo un candado: son seguros con peticiones
+concurrentes. Con varios workers cada proceso tendría los suyos; por eso se corre con
+uno solo.
+
+### Tablero
+
+`GET /dashboard` es HTML estático: no trae datos ni clave. Pide la clave en
+`data-testid="dashboard-key"` (tipo contraseña) y la guarda en `sessionStorage` con
+la misma llave que la página principal (si ya la escribiste ahí, no la vuelve a
+pedir). Lee `GET /metrics` al pulsar Enter o al salir del campo, y luego cada 10
+segundos. Muestra peticiones (`dashboard-requests`), tasa de error
+(`dashboard-error-rate`), p50 y p95 contra el SLO (`dashboard-p95`), costo total y
+por respuesta (`dashboard-cost`), tasa de aciertos de la caché
+(`dashboard-cache-hit-rate`), supervisor y respaldo, tabla por especialista
+(`dashboard-specialists`), tabla por cliente (`dashboard-clients`) y contadores de
+seguridad (`dashboard-security`). Con `401` muestra «Clave inválida» y con `403`
+«Sin permiso para ver métricas». Solo usa `textContent`, nunca `innerHTML`.
 
 ## Seguridad
 
@@ -189,14 +262,33 @@ un UUID. Un error inesperado responde `500` con
 
 ## Log
 
-Una línea JSON por evento en la salida estándar, con `ts` (UTC), `service`, `event` y
-`request_id`. Eventos: `request` (con `client`, o `null` en rutas públicas y
-rechazos), `agent_run` (`client`, conteos, `model`, `route`, `history_sent`,
-`cached_calls` y `cost_usd`; nunca el texto de la pregunta ni de la respuesta), `audit`
-(con `client` y `action`; las acciones están en «Seguridad»), `auth_rejected` (`reason`: `missing` o
-`invalid`), `rate_limited` (`client` y `retry_after`) y `error` (solo el tipo de error,
-por ejemplo `ModelUnavailable`). Las trazas de LangSmith llevan `request_id` y `client`
-en sus metadatos.
+Una línea JSON por evento en la salida estándar, con `ts` (UTC, del reloj inyectado),
+`service`, `event` y `request_id`. Eventos:
+
+| Evento | Campos |
+| --- | --- |
+| `request` | `client` (o `null` en rutas públicas y rechazos), `method`, `path`, `status`, `latency_ms` |
+| `agent_run` | `client`, `question_chars`, `history_messages`, `steps`, `tools`, `input_tokens`, `output_tokens`, `stopped`, `model`, `route`, `history_sent`, `cached_calls`, `cost_usd`, `specialist`, `agents`, `supervisor_route`, `pii_types`, `cached`, `fallback`; también en los aciertos de caché |
+| `audit` | `client` y `action` (`tool_call` con `tool` y `args`, `input_blocked`, `pii_redacted`, `output_blocked`, `access_denied`, `metrics_read`; ver «Seguridad») |
+| `auth_rejected` | `reason`: `missing` o `invalid` |
+| `rate_limited` | `client` y `retry_after` |
+| `error` | Solo el tipo de error, por ejemplo `ModelUnavailable` |
+
+Nunca el texto de la pregunta ni de la respuesta, ni el valor de un dato personal.
+
+## Trazas
+
+Con `LANGSMITH_TRACING=true` y `LANGSMITH_API_KEY`, cada `POST /ask` deja un run raíz
+`request` y, dentro, un run por agente: `agent.guard`, `agent.supervisor`,
+`agent.directory` o `agent.policy` (con sus llamadas `model.complete` y herramientas)
+y `agent.reviewer`. Todos llevan `request_id` y `client` en los metadatos; desde que
+el supervisor decide, también `specialist` (la salida de `agent.supervisor` dice cuál
+eligió). El run raíz, `agent.guard`, `agent.supervisor` y `agent.reviewer` no tienen
+entradas y su salida es un resumen (tipos, conteos, decisiones y costo): la pregunta
+original nunca llega a la traza. El especialista recibe solo texto ya redactado, y con
+`HIDE_INPUTS=true` y `HIDE_OUTPUTS=true` (por omisión) no se manda texto. Sin la
+clave no se importa `langsmith` ni se abre ninguna conexión; en las pruebas el tracer
+se inyecta.
 
 ## Variables de entorno
 
@@ -235,6 +327,7 @@ en sus metadatos.
 | `FAKE_UNAVAILABLE_MODELS` | vacía | Modelos simulados que fallan, separados por coma; solo con `fake` |
 | `ANSWER_CACHE_TTL_SECONDS` | `0` | Vida de la caché de respuestas en segundos (0: apagada) |
 | `ANSWER_CACHE_MAX_ENTRIES` | `256` | Tope de entradas de la caché de respuestas (entero mayor que 0) |
+| `POLICIES_PATH` | `data/policies.json` | Políticas de RH, relativo a `product/` (copia de `spec/policies.json`) |
 
 `.env.example` trae todas las variables sin valores secretos. Un valor inválido impide
 arrancar con un `ConfigError`. La clave de LangSmith se lee del entorno y nunca se
@@ -251,6 +344,7 @@ uv run python -m verification qa     # estilo de QA.md (pylint, 88 columnas, sin
 uv run python -m verification contract  # contratos contra el producto corriendo
 uv run python -m verification e2e       # Playwright sobre la página (modelo simulado)
 uv run python -m verification evaluate  # costo y calidad: línea base contra palancas
+uv run python -m verification load      # 60 peticiones con 10 hilos, todas 200
 ```
 
 Las pruebas usan un reloj fijo, el log en memoria y trazas apagadas: no usan red. El
