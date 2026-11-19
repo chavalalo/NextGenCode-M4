@@ -51,6 +51,8 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         self._tokens = {"input": 0, "output": 0}
         self._cost_usd = 0.0
         self._security = dict.fromkeys(SECURITY_COUNTERS, 0)
+        self._cache = {"hits": 0, "misses": 0}
+        self._fallbacks = 0
         self._lock = threading.Lock()
 
     def record_request(self, latency_ms, status):
@@ -109,6 +111,45 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         """
         with self._lock:
             return dict(self._security)
+
+    def record_cache(self, hit):
+        """Cuenta una consulta a la caché de respuestas.
+
+        :param hit: ``True`` si hubo acierto; ``False`` si fue un fallo
+        :type hit: bool
+        """
+        with self._lock:
+            self._cache["hits" if hit else "misses"] += 1
+
+    def cache(self):
+        """Devuelve aciertos, fallos y tasa de aciertos de la caché.
+
+        :return: ``hits``, ``misses`` y ``hit_rate`` (0.0 sin consultas)
+        :rtype: dict
+        """
+        with self._lock:
+            hits = self._cache["hits"]
+            misses = self._cache["misses"]
+        total = hits + misses
+        return {
+            "hits": hits,
+            "misses": misses,
+            "hit_rate": hits / total if total else 0.0,
+        }
+
+    def add_fallback(self):
+        """Cuenta una respuesta del modelo de respaldo."""
+        with self._lock:
+            self._fallbacks += 1
+
+    def fallbacks(self):
+        """Devuelve cuántas respuestas dio el modelo de respaldo.
+
+        :return: Respuestas del modelo de respaldo
+        :rtype: int
+        """
+        with self._lock:
+            return self._fallbacks
 
     def cost_usd(self):
         """Devuelve el costo acumulado de este proceso.

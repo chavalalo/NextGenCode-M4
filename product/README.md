@@ -65,7 +65,8 @@ El modelo real recibe
 con `Authorization: Bearer {CF_API_TOKEN}`. Si falla, `POST /ask` responde `502` con
 `{"detail": "model unavailable", "request_id": ...}`.
 
-Cuatro palancas bajan el costo; cada una se mide con `verification evaluate`:
+Cinco palancas bajan el costo; cada una se mide con `verification evaluate` (la caché
+de respuestas, apagada contra encendida):
 
 1. **Enrutamiento** (`ROUTING`, `ROUTER_MAX_CHARS`): una regla en código manda al
    modelo capaz (`MODEL_LARGE`) las preguntas largas o con «compara», «resume»,
@@ -77,6 +78,33 @@ Cuatro palancas bajan el costo; cada una se mide con `verification evaluate`:
 4. **Caché de AI Gateway** (`CACHE_TTL_SECONDS` > 0): manda `cf-aig-cache-ttl`; si el
    gateway responde `cf-aig-cache-status: HIT`, esa llamada cuenta en `cached_calls` y
    no cuesta.
+
+5. **Caché de respuestas** (`ANSWER_CACHE_TTL_SECONDS` > 0, `app/cache.py`): una
+   pregunta sin historial y sin datos personales cuya forma normalizada (minúsculas,
+   sin acentos, espacios colapsados) ya se respondió dentro del TTL sale de la memoria
+   del proceso, sin llamar a ningún modelo: `cached: true`, `cost_usd: 0`, `steps: 0`,
+   tokens en 0, `tools_used: []` y `agents: ["guard", "cache"]`, con la misma
+   `answer`, `specialist`, `supervisor_route`, `model` y `route` de la primera vez.
+   Solo se guardan respuestas completas (`stopped: answer`), sin bloqueo del revisor y
+   sin respaldo. Caben `ANSWER_CACHE_MAX_ENTRIES` (sale la más vieja); un candado la
+   hace segura con peticiones concurrentes. Es compartida entre clientes porque los
+   datos son de solo lectura e iguales para todos. Los aciertos también escriben
+   `agent_run` y cuentan en `cache` de `GET /metrics` (`hits`, `misses`, `hit_rate`).
+
+### Resiliencia
+
+- **Reintentos** (`app/resilience.py`): el modelo `gateway` reintenta hasta
+  `MODEL_RETRIES` veces ante timeout, `429` o `5xx` (nunca ante otro `4xx`), con espera
+  exponencial `MODEL_RETRY_BACKOFF_SECONDS * 2**i` (0.5 s y 1 s por omisión). La
+  espera la da el reloj inyectado: en las pruebas no se duerme.
+- **Respaldo** (`MODEL_FALLBACK=true`): si el modelo elegido sigue sin responder, el
+  especialista se repite una sola vez con el otro (`MODEL_SMALL` <-> `MODEL_LARGE`);
+  la respuesta trae `fallback: true` y en `model` el que contestó, y suma en
+  `fallbacks` de `GET /metrics`. Si también falla, `502`. Estas respuestas no entran
+  a la caché.
+- **Sin red** (`FAKE_UNAVAILABLE_MODELS`, solo con `MODEL_PROVIDER=fake`): los modelos
+  simulados nombrados fallan como el gateway, sin reintentos, para probar el
+  respaldo y el `502`.
 
 El costo se calcula con `data/model_prices.json` (USD por millón de tokens), copia de
 `spec/model_prices.json`, que viene de la página de precios de Workers AI. Los precios
@@ -95,8 +123,8 @@ el dato que hay que pasar a soporte.
 | `GET /` | no | Página web |
 | `GET /health` | no | `{"status": "ok", "pid": ...}` |
 | `GET /docs` | no | Documentación de la API |
-| `POST /ask` | sí | Recibe `{"question", "history"}` y responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd`; `400` si el guardián bloquea la entrada |
-| `GET /metrics` | sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens`, `slo`, `cost_usd` acumulado de este proceso y `security` (`blocked_inputs`, `pii_redactions`, `output_blocked`, `access_denied`); `403` si `METRICS_CLIENTS` no nombra al cliente |
+| `POST /ask` | sí | Recibe `{"question", "history"}` y responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls`, `cost_usd`, `cached` (caché de respuestas) y `fallback` (modelo de respaldo); `400` si el guardián bloquea la entrada; `502` si ningún modelo contesta |
+| `GET /metrics` | sí | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens`, `slo`, `cost_usd` acumulado de este proceso y `security` (`blocked_inputs`, `pii_redactions`, `output_blocked`, `access_denied`), `cache` (`hits`, `misses`, `hit_rate`) y `fallbacks`; `403` si `METRICS_CLIENTS` no nombra al cliente |
 
 ## Seguridad
 
@@ -197,6 +225,12 @@ en sus metadatos.
 | `MODEL_TEMPERATURE` | `0` | Temperatura; con 0 las evaluaciones son repetibles |
 | `CACHE_TTL_SECONDS` | `0` | Caché del gateway en segundos (0: apagada) |
 | `PRICES_PATH` | `data/model_prices.json` | Precios por modelo, relativo a `product/` |
+| `MODEL_RETRIES` | `2` | Reintentos del gateway ante timeout, `429` o `5xx` (entero, 0 o más) |
+| `MODEL_RETRY_BACKOFF_SECONDS` | `0.5` | Primera espera entre reintentos; se duplica (número, 0 o más) |
+| `MODEL_FALLBACK` | `true` | Repetir el especialista una vez con el otro modelo (`true` o `false`) |
+| `FAKE_UNAVAILABLE_MODELS` | vacía | Modelos simulados que fallan, separados por coma; solo con `fake` |
+| `ANSWER_CACHE_TTL_SECONDS` | `0` | Vida de la caché de respuestas en segundos (0: apagada) |
+| `ANSWER_CACHE_MAX_ENTRIES` | `256` | Tope de entradas de la caché de respuestas (entero mayor que 0) |
 
 `.env.example` trae todas las variables sin valores secretos. Un valor inválido impide
 arrancar con un `ConfigError`. La clave de LangSmith se lee del entorno y nunca se

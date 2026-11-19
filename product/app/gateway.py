@@ -28,8 +28,38 @@ SYSTEM_ROLE = "system"
 SYSTEM_PROMPT = DIRECTORY_PROMPT
 
 
+TOO_MANY_REQUESTS_STATUS = 429
+SERVER_ERROR_STATUS = 500
+
+
 class ModelUnavailable(RuntimeError):
-    """El gateway no respondió o su respuesta no se pudo usar."""
+    """El gateway no respondió o su respuesta no se pudo usar.
+
+    :param message: Mensaje fijo, sin URL, cuerpo ni token
+    :type message: str
+    :param retryable: ``True`` si vale la pena reintentar (timeout, 429 o 5xx)
+    :type retryable: bool
+    """
+
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _is_retryable(error):
+    """Decide si un error HTTP del gateway merece un reintento.
+
+    :param error: Error de ``httpx``
+    :type error: httpx.HTTPError
+    :return: ``True`` ante timeout, ``429`` o ``5xx``
+    :rtype: bool
+    """
+    if isinstance(error, httpx.TimeoutException):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status == TOO_MANY_REQUESTS_STATUS or status >= SERVER_ERROR_STATUS
+    return False
 
 
 def _as_json_text(content):
@@ -147,7 +177,7 @@ class GatewayModel:  # pylint: disable=too-few-public-methods
         :return: Respuesta con tokens reales y si vino de la caché
         :rtype: app.completion.Completion
         :raises ModelUnavailable: Ante error de red, estado no 2xx o respuesta
-            sin el formato esperado
+            sin el formato esperado; ``retryable`` indica timeout, 429 o 5xx
         """
         try:
             response = self._client.post(
@@ -158,9 +188,11 @@ class GatewayModel:  # pylint: disable=too-few-public-methods
             )
             response.raise_for_status()
             content, input_tokens, output_tokens = _read_body(response.json())
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
             # Sin el error original: su texto puede traer la URL con la cuenta.
-            raise ModelUnavailable("the model gateway request failed") from None
+            raise ModelUnavailable(
+                "the model gateway request failed", retryable=_is_retryable(error)
+            ) from None
         except (KeyError, IndexError, TypeError, ValueError):
             raise ModelUnavailable(
                 "the model gateway returned an invalid response"

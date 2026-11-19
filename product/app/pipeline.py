@@ -5,24 +5,25 @@ respaldo) -> revisor. Este módulo arma el resultado (``AskOutcome``) con los
 tokens y el costo de todas las llamadas, escribe ``audit`` y ``agent_run`` y
 suma las métricas.
 
-``_guard`` (prompt injection y PII de entrada) y ``_review`` (PII de salida,
-ids inexistentes y recorte) ya están completos. Los métodos marcados con
-«Punto de conexión» son los que completan los agentes siguientes, sin cambiar
-la firma:
-
-- ``costs``: ``_cache_lookup`` y ``_cache_store`` (caché de respuestas) y
-  ``_run_specialist`` (respaldo con el otro modelo).
-- ``observability``: ``_record`` (contadores de negocio) y las trazas de
-  ``agent.guard``, ``agent.supervisor`` y ``agent.reviewer``.
+``_guard`` (prompt injection y PII de entrada), ``_review`` (PII de salida,
+ids inexistentes y recorte), ``_cache_lookup`` y ``_cache_store`` (caché de
+respuestas) y ``_run_specialist`` (respaldo con el otro modelo) ya están
+completos. Los métodos marcados con «Punto de conexión» son los que completa
+``observability`` sin cambiar la firma: ``_record`` (contadores de negocio) y
+las trazas de ``agent.guard``, ``agent.supervisor`` y ``agent.reviewer``.
 """
 
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agent import STOPPED_ANSWER
+from app.cache import normalize_question
 from app.costs import COST_DECIMALS
+from app.gateway import ModelUnavailable
 from app.guard import InputBlocked, inspect
 from app.levers import choose_model, trim_history
 from app.metrics import BLOCKED_INPUTS, OUTPUT_BLOCKED, PII_REDACTIONS
+from app.resilience import run_with_fallback
 from app.reviewer import BLOCK_REASON as REVIEW_BLOCK_REASON
 from app.reviewer import review
 
@@ -71,6 +72,29 @@ class ReviewedAnswer:
 
 
 @dataclass(frozen=True)
+class CachedAnswer:
+    """Lo que guarda la caché de respuestas: solo la respuesta y su origen.
+
+    :param answer: Respuesta ya revisada
+    :type answer: str
+    :param specialist: ``directory`` o ``policy``
+    :type specialist: str
+    :param supervisor_route: Motivo del supervisor
+    :type supervisor_route: str
+    :param model: Modelo que contestó
+    :type model: str
+    :param route: Motivo del enrutador de costo
+    :type route: str
+    """
+
+    answer: str
+    specialist: str
+    supervisor_route: str
+    model: str
+    route: str
+
+
+@dataclass(frozen=True)
 class SpecialistRun:
     """Corrida de un especialista.
 
@@ -108,10 +132,10 @@ class AskOutcome:  # pylint: disable=too-many-instance-attributes
     :type model: str
     :param route: Motivo del enrutador de costo
     :type route: str
-    :param cached_calls: Llamadas respondidas desde la caché del gateway
-    :type cached_calls: int
     :param cost_usd: Costo en USD
     :type cost_usd: float
+    :param cached_calls: Llamadas respondidas desde la caché del gateway
+    :type cached_calls: int
     :param specialist: ``directory`` o ``policy``
     :type specialist: str
     :param agents: Agentes que corrieron, en orden
@@ -141,8 +165,8 @@ class AskOutcome:  # pylint: disable=too-many-instance-attributes
     output_tokens: int
     model: str
     route: str
-    cached_calls: int
     cost_usd: float
+    cached_calls: int
     specialist: str
     agents: list
     supervisor_route: str
@@ -231,6 +255,9 @@ class PipelineDependencies:  # pylint: disable=too-many-instance-attributes
     :type logger: app.logs.JsonLogger
     :param metrics: Métricas del proceso
     :type metrics: app.metrics.Metrics
+    :param answer_cache: Caché de respuestas; ``None`` si está apagada
+        (``ANSWER_CACHE_TTL_SECONDS=0``)
+    :type answer_cache: app.cache.AnswerCache or None
     """
 
     settings: object
@@ -242,6 +269,7 @@ class PipelineDependencies:  # pylint: disable=too-many-instance-attributes
     tracer: object
     logger: object
     metrics: object
+    answer_cache: object = None
 
 
 class AskPipeline:
@@ -410,37 +438,94 @@ class AskPipeline:
         )
         self._deps.metrics.add_security(PII_REDACTIONS, redaction.count)
 
-    def _cache_lookup(self, guarded):  # pylint: disable=unused-argument
+    def _cache_key(self, guarded):
+        """Llave de la caché si la pregunta puede usarla.
+
+        Aplica solo con la caché encendida, sin historial y sin PII en la
+        entrada.
+
+        :param guarded: Entrada ya revisada por el guardián
+        :type guarded: GuardedInput
+        :return: Pregunta normalizada o ``None`` si no aplica la caché
+        :rtype: str or None
+        """
+        if self._deps.answer_cache is None:
+            return None
+        if guarded.history or guarded.pii_types:
+            return None
+        return normalize_question(guarded.question)
+
+    def _cache_lookup(self, guarded):
         """Busca la respuesta en la caché de respuestas.
 
-        Punto de conexión (costs): solo con ``ANSWER_CACHE_TTL_SECONDS > 0``,
-        sin historial y sin PII; un acierto devuelve ``agents: ["guard",
-        "cache"]``, costo, pasos y tokens en 0 y ``cached: True``.
+        Solo con ``ANSWER_CACHE_TTL_SECONDS > 0``, sin historial y sin PII; un
+        acierto devuelve ``agents: ["guard", "cache"]``, costo, pasos y tokens
+        en 0 y ``cached: True``. Una consulta sin acierto cuenta como fallo.
 
         :param guarded: Entrada ya revisada por el guardián
         :type guarded: GuardedInput
         :return: Resultado desde la caché o ``None`` si no hay acierto
         :rtype: AskOutcome or None
         """
-        return None
+        key = self._cache_key(guarded)
+        if key is None:
+            return None
+        entry = self._deps.answer_cache.get(key)
+        self._deps.metrics.record_cache(hit=entry is not None)
+        if entry is None:
+            return None
+        return AskOutcome(
+            answer=entry.answer,
+            steps=0,
+            tools_used=[],
+            input_tokens=0,
+            output_tokens=0,
+            model=entry.model,
+            route=entry.route,
+            cached_calls=0,
+            cost_usd=0.0,
+            specialist=entry.specialist,
+            agents=[AGENT_GUARD, AGENT_CACHE],
+            supervisor_route=entry.supervisor_route,
+            cached=True,
+        )
 
-    def _cache_store(self, guarded, outcome):  # pylint: disable=unused-argument
+    def _cache_store(self, guarded, outcome):
         """Guarda una respuesta candidata en la caché de respuestas.
 
-        Punto de conexión (costs): solo respuestas con ``stopped == "answer"``,
-        sin bloqueo del revisor y sin respaldo.
+        Solo respuestas con ``stopped == "answer"``, sin bloqueo del revisor y
+        sin respaldo.
 
         :param guarded: Entrada ya revisada por el guardián
         :type guarded: GuardedInput
         :param outcome: Resultado recién calculado
         :type outcome: AskOutcome
         """
+        key = self._cache_key(guarded)
+        if key is None:
+            return
+        if (
+            outcome.stopped != STOPPED_ANSWER
+            or outcome.output_blocked
+            or outcome.fallback
+        ):
+            return
+        self._deps.answer_cache.put(
+            key,
+            CachedAnswer(
+                answer=outcome.answer,
+                specialist=outcome.specialist,
+                supervisor_route=outcome.supervisor_route,
+                model=outcome.model,
+                route=outcome.route,
+            ),
+        )
 
     def _run_specialist(self, agent, messages, model_name):
         """Corre el especialista con el modelo elegido por el enrutador.
 
-        Punto de conexión (costs): si el modelo sigue caído y
-        ``MODEL_FALLBACK=true``, repetir una vez con el otro modelo y marcar
+        Si el modelo sigue caído (después de los reintentos del gateway) y
+        ``MODEL_FALLBACK=true``, lo repite una vez con el otro modelo y marca
         ``fallback=True``.
 
         :param agent: Especialista elegido
@@ -451,10 +536,21 @@ class AskPipeline:
         :type model_name: str
         :return: Resultado del especialista y modelo que contestó
         :rtype: SpecialistRun
-        :raises app.gateway.ModelUnavailable: Si el modelo no contesta
+        :raises app.gateway.ModelUnavailable: Si ningún modelo contesta
         """
-        result = agent.run(messages, model=self._deps.models[model_name])
-        return SpecialistRun(result=result, model=model_name)
+        models = self._deps.models
+
+        def run(name):
+            if name not in models:
+                raise ModelUnavailable("the model is not configured")
+            return agent.run(messages, model=models[name])
+
+        attempt = run_with_fallback(run, model_name, self._deps.settings)
+        if attempt.fallback:
+            self._deps.metrics.add_fallback()
+        return SpecialistRun(
+            result=attempt.value, model=attempt.model, fallback=attempt.fallback
+        )
 
     def _review(self, request_id, client, answer):
         """Revisor de salida.

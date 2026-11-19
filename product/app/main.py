@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import can_read_metrics, identify_client
+from app.cache import AnswerCache
 from app.clock import SystemClock
 from app.compliance import enforce
 from app.config import ConfigError, Settings
@@ -420,6 +421,8 @@ def _add_routes(application, runtime):
         snapshot = runtime.metrics.snapshot(os.getpid())
         snapshot["cost_usd"] = runtime.metrics.cost_usd()
         snapshot["security"] = runtime.metrics.security()
+        snapshot["cache"] = runtime.metrics.cache()
+        snapshot["fallbacks"] = runtime.metrics.fallbacks()
         return snapshot
 
     @application.post("/ask", response_model=AskResponse)
@@ -485,6 +488,24 @@ def _resolve_models(settings, model, models, build):
     return build()
 
 
+def _build_answer_cache(settings, clock):
+    """Crea la caché de respuestas si está encendida.
+
+    :param settings: Configuración con ``ANSWER_CACHE_TTL_SECONDS`` y
+        ``ANSWER_CACHE_MAX_ENTRIES``
+    :type settings: app.config.Settings
+    :param clock: Reloj que mide la vida de cada respuesta
+    :type clock: app.clock.Clock
+    :return: Caché o ``None`` si el TTL es 0
+    :rtype: app.cache.AnswerCache or None
+    """
+    if settings.answer_cache_ttl_seconds <= 0:
+        return None
+    return AnswerCache(
+        settings.answer_cache_ttl_seconds, settings.answer_cache_max_entries, clock
+    )
+
+
 # Las dependencias se inyectan por nombre para las pruebas.
 # pylint: disable-next=too-many-arguments
 def create_app(
@@ -530,15 +551,20 @@ def create_app(
     enforce(settings)
     directory = directory or EmployeeDirectory(settings.employees_path)
     policies = _load_policies(settings.policies_path)
+    clock = clock if clock is not None else SystemClock()
     models = _resolve_models(
         settings,
         model,
         models,
         lambda: build_models(
-            settings, directory.departments(), http_client, policies.keywords()
+            settings,
+            directory.departments(),
+            http_client,
+            policies.keywords(),
+            # Relojes de prueba viejos sin ``sleep``: se usa ``time.sleep``.
+            sleep=getattr(clock, "sleep", None),
         ),
     )
-    clock = clock if clock is not None else SystemClock()
     tracer = tracer if tracer is not None else build_tracer(settings)
     dependencies = PipelineDependencies(
         settings=settings,
@@ -556,6 +582,7 @@ def create_app(
         tracer=tracer,
         logger=JsonLogger(settings.service_name, clock, log_stream),
         metrics=Metrics(settings.slo_p95_ms),
+        answer_cache=_build_answer_cache(settings, clock),
     )
     runtime = _Runtime(
         settings=settings,

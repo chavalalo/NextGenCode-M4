@@ -2,19 +2,22 @@
 
 import json
 import re
+import time
 import unicodedata
 from typing import Protocol, Sequence
 
 from app.completion import Completion
-from app.gateway import GatewayModel
+from app.gateway import GatewayModel, ModelUnavailable
 from app.policies import phrase_pattern
 from app.prompts import POLICY_PROMPT, SUPERVISOR_PROMPT
+from app.resilience import RetryingModel
 
 __all__ = [
     "Completion",
     "FakeModel",
     "GatewayModel",
     "LanguageModel",
+    "UnavailableModel",
     "build_models",
     "count_words",
 ]
@@ -196,11 +199,38 @@ class FakeModel:
         return None
 
 
-def build_models(settings, departments, http_client=None, policy_keywords=None):
+class UnavailableModel:  # pylint: disable=too-few-public-methods
+    """Modelo simulado caído: falla como el gateway, sin reintentos.
+
+    Lo usa ``FAKE_UNAVAILABLE_MODELS`` para probar el respaldo sin red. El
+    error no es ``retryable`` para que las verificaciones no esperen.
+
+    :param name: Nombre del modelo, como en la tabla de precios
+    :type name: str
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+    def complete(self, messages):  # pylint: disable=unused-argument
+        """Falla siempre como un gateway que no responde.
+
+        :param messages: Mensajes con ``role`` y ``content``
+        :type messages: Sequence[dict]
+        :raises app.gateway.ModelUnavailable: Siempre
+        """
+        raise ModelUnavailable("the model gateway request failed")
+
+
+def build_models(
+    settings, departments, http_client=None, policy_keywords=None, *, sleep=None
+):
     """Construye el modelo barato y el capaz según la configuración.
 
     Con ``fake`` son dos modelos simulados con los nombres de ``MODEL_SMALL`` y
-    ``MODEL_LARGE``; con ``gateway`` son dos modelos reales de AI Gateway.
+    ``MODEL_LARGE``; los de ``FAKE_UNAVAILABLE_MODELS`` fallan siempre. Con
+    ``gateway`` son dos modelos reales de AI Gateway envueltos con reintentos
+    (``MODEL_RETRIES`` y ``MODEL_RETRY_BACKOFF_SECONDS``).
 
     :param settings: Configuración de la aplicación
     :type settings: app.config.Settings
@@ -211,16 +241,32 @@ def build_models(settings, departments, http_client=None, policy_keywords=None):
     :param policy_keywords: Tema por palabra clave de política, para el modelo
         simulado
     :type policy_keywords: Mapping[str, str] or None
+    :param sleep: Espera entre reintentos del gateway; si falta, ``time.sleep``
+    :type sleep: callable or None
     :return: Modelos por nombre
     :rtype: dict[str, LanguageModel]
     :raises ValueError: Si el proveedor no está soportado
     """
-    # Punto de conexión (costs): FAKE_UNAVAILABLE_MODELS y reintentos.
     names = (settings.model_small, settings.model_large)
     if settings.model_provider == "fake":
+        unavailable = set(settings.fake_unavailable_models)
         return {
-            name: FakeModel(departments, name, policy_keywords) for name in names
+            name: (
+                UnavailableModel(name)
+                if name in unavailable
+                else FakeModel(departments, name, policy_keywords)
+            )
+            for name in names
         }
     if settings.model_provider == "gateway":
-        return {name: GatewayModel(name, settings, http_client) for name in names}
+        wait = sleep if sleep is not None else time.sleep
+        return {
+            name: RetryingModel(
+                GatewayModel(name, settings, http_client),
+                settings.model_retries,
+                settings.model_retry_backoff_seconds,
+                wait,
+            )
+            for name in names
+        }
     raise ValueError(f"Unsupported model provider: {settings.model_provider}")
