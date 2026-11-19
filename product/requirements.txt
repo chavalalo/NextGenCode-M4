@@ -6,3 +6,5 @@ langsmith
 pytest
 pytest-bdd
 pytest-cov
+pylint
+pytest-playwright

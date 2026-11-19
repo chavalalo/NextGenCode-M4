@@ -1,64 +1,82 @@
-# Arquitectura del HR Assistant (sesiones 1, 2 y 3)
+# Arquitectura del HR Assistant (sesiones 1 a 4)
 
 El HR Assistant responde preguntas del personal de RH sobre empleados. Es una API FastAPI sin
 estado con una página web, un solo agente con bucle con tope y un modelo detrás de una
 interfaz. La sesión 2 agrega observabilidad (id por petición, log JSON, métricas, trazas
 opcionales). La sesión 3 agrega el modelo real (Workers AI vía AI Gateway) y cuatro palancas de
-costo: enrutamiento, ventana de historial, tope de salida y caché, con el costo de cada
-respuesta.
+costo. La sesión 4 lo lleva a producción: clave por cliente, límite de peticiones, compliance
+como código, contenedor, CI en cuatro etapas y publicación en Render solo si el CI pasa.
 
 ## Componentes
 
 ```mermaid
 flowchart LR
     subgraph Navegador
-        UI["index.html<br/>historial local<br/>muestra request_id"]
+        UI["index.html<br/>clave en sessionStorage<br/>historial local"]
     end
     subgraph API["FastAPI (main.py, sin estado de negocio)"]
         MW["middleware<br/>X-Request-ID, latencia, 500"]
+        AUTH["require_client<br/>401 / 429"]
         ASK["POST /ask<br/>502 si el modelo falla"]
-        HEALTH["GET /health"]
         METRICS["GET /metrics"]
-        HOME["GET /"]
+        PUBLIC["GET / , /health, /docs<br/>sin clave"]
     end
     CFG["config.py<br/>Settings.from_env"]
-    LEV["levers.py<br/>choose_model, trim_history"]
-    COST["costs.py<br/>PriceTable"]
-    PRICES[("data/model_prices.json")]
-    LOG["logs.py<br/>JsonLogger"]
-    MET["metrics.py<br/>Metrics + cost_usd"]
-    TR["tracing.py<br/>Tracer"]
-    AGENT["agent.py<br/>bucle con tope"]
-    LLM["llm.py<br/>LanguageModel, FakeModel x2"]
-    GW["gateway.py<br/>GatewayModel (httpx)"]
-    CF[("Cloudflare AI Gateway<br/>Workers AI, caché")]
-    DIR["directory.py<br/>solo lectura"]
-    DATA[("data/employees.json")]
-    STDOUT[["stdout<br/>una línea JSON por evento"]]
+    COMP["compliance.py<br/>enforce al arrancar"]
+    KEYS["auth.py<br/>parse_api_keys, compare_digest"]
+    RL["ratelimit.py<br/>ventana de 60 s por cliente"]
+    CLK["clock.py"]
+    LEV["levers.py"]
+    COST["costs.py"]
+    LOG["logs.py<br/>client, nunca la clave"]
+    MET["metrics.py"]
+    TR["tracing.py<br/>request_id + client"]
+    AGENT["agent.py"]
+    LLM["llm.py / gateway.py"]
+    CF[("Cloudflare AI Gateway")]
+    DIR["directory.py"]
 
-    UI -- "question + history" --> MW
-    MW --> ASK
-    MW --> HEALTH
-    MW --> METRICS
-    MW --> HOME
-    ASK -- "answer, model, route, cost_usd, request_id" --> UI
-    CFG -. "create_app inyecta" .-> API
-    ASK -- "pregunta" --> LEV
-    ASK -- "modelo + completions" --> COST
-    COST --> PRICES
-    ASK -- "agent_run, audit" --> LOG
-    MW -- "request, error" --> LOG
-    LOG --> STDOUT
-    ASK -- "tokens, costo" --> MET
-    MW -- "latencia, estado" --> MET
+    UI -- "X-API-Key + question + history" --> MW
+    MW --> PUBLIC
+    MW --> AUTH
+    AUTH --> KEYS
+    AUTH --> RL
+    RL --> CLK
+    AUTH -- "client" --> ASK
+    AUTH -- "client" --> METRICS
+    CFG --> KEYS
+    CFG --> COMP
+    COMP -. "ConfigError: no arranca" .-> API
+    ASK --> LEV
+    ASK --> COST
+    ASK --> AGENT
+    TR -. "envuelve" .-> AGENT
+    AGENT --> LLM
+    LLM --> CF
+    AGENT --> DIR
+    ASK --> LOG
+    MW --> LOG
+    AUTH -- "auth_rejected, rate_limited" --> LOG
+    ASK --> MET
     METRICS --> MET
-    ASK -- "historial recortado + modelo elegido" --> AGENT
-    TR -. "envuelve run, complete, herramientas" .-> AGENT
-    AGENT -- "messages" --> LLM
-    LLM -- "MODEL_PROVIDER=gateway" --> GW
-    GW -- "max_tokens, temperature, cf-aig-cache-ttl" --> CF
-    AGENT -- "get_employee / search_by_department" --> DIR
-    DIR --> DATA
+```
+
+## Publicación
+
+```mermaid
+flowchart LR
+    DEV["Fábrica<br/>verificaciones en verde"] --> OK{"Persona aprueba<br/>output/approved.txt"}
+    OK -- "si" --> PUB["scripts/publish.py<br/>repo privado en GitHub"]
+    PUB --> CI
+    subgraph CI["GitHub Actions (ci.yml)"]
+        S["style<br/>pylint 88"] --> U["unit<br/>cobertura 80 %"] --> E["e2e<br/>Playwright, modelo simulado"] --> D["docker<br/>docker build"]
+    end
+    D -- "checksPass" --> R["Render<br/>Blueprint render.yaml<br/>python:3.12-slim, sin root"]
+    SEC[("Secretos en Render<br/>API_KEYS, CF_ACCOUNT_ID, CF_API_TOKEN")] -.-> R
+    R --> COMPL{"compliance.enforce"}
+    COMPL -- "falla" --> FAIL["despliegue fallido"]
+    COMPL -- "pasa" --> LIVE["Live: /health"]
+    LIVE --> SMOKE["verification production<br/>/health 200, sin clave 401, con clave 200"]
 ```
 
 ## Secuencia de una pregunta
@@ -67,31 +85,26 @@ flowchart LR
 sequenceDiagram
     participant W as Página web
     participant MW as Middleware
+    participant AU as require_client
+    participant RL as RateLimiter
     participant A as POST /ask
-    participant R as levers
-    participant G as Agent
-    participant M as Modelo elegido
-    participant P as PriceTable
-    participant X as Metrics
-    W->>MW: POST /ask (X-Request-ID opcional)
-    MW->>A: petición con request_id
-    A->>R: choose_model(question)
-    R-->>A: model, route
-    A->>R: trim_history(history, HISTORY_WINDOW)
-    A->>G: run(historial + question, model)
-    loop hasta AGENT_MAX_STEPS
-        G->>M: complete(messages)
-        alt gateway falla
-            M-->>A: ModelUnavailable
-            A-->>W: 502 model unavailable + request_id
-        else responde
-            M-->>G: Completion (tokens, cached)
+    participant G as Agent y modelo
+    W->>MW: POST /ask + X-API-Key
+    MW->>AU: petición con request_id
+    alt sin clave o inválida
+        AU-->>W: 401 invalid or missing API key
+    else clave válida
+        AU->>RL: check(client)
+        alt pasa el límite
+            RL-->>W: 429 rate limit exceeded + Retry-After
+        else dentro del límite
+            AU->>A: client
+            A->>G: run (traza con request_id y client)
+            G-->>A: answer, completions
+            A-->>W: answer, model, route, cost_usd, request_id
         end
     end
-    G-->>A: answer, completions, cached_calls
-    A->>P: cost(model, completions sin HIT)
-    A->>X: tokens y cost_usd
-    A-->>W: answer, model, route, cached_calls, cost_usd, request_id
+    MW->>MW: log request con client y status
 ```
 
 ## Decisiones
@@ -105,13 +118,19 @@ sequenceDiagram
 - [0007 Modelo real detrás de la interfaz, con cliente HTTP inyectado](adr/0007-gateway-model-behind-interface.md)
 - [0008 Enrutamiento por regla y ventana de historial](adr/0008-rule-based-routing-and-history-window.md)
 - [0009 Costo por respuesta y modelos simulados con precio](adr/0009-cost-per-answer-and-priced-fake-models.md)
+- [0010 Clave por cliente y límite de peticiones en memoria](adr/0010-per-client-api-keys-and-rate-limit.md)
+- [0011 Compliance como código: el producto se niega a arrancar](adr/0011-compliance-as-code-at-startup.md)
+- [0012 Contenedor, CI en cuatro etapas y Render con checksPass](adr/0012-container-ci-and-render-checks-pass.md)
 
 ## Configuración
 
 | Variable | Por omisión | Validación |
 | --- | --- | --- |
-| `MODEL_PROVIDER` | `fake` | `fake` o `gateway` |
-| `CF_ACCOUNT_ID`, `CF_GATEWAY_ID`, `CF_API_TOKEN` | vacía, `default`, vacía | Obligatorias y no vacías con `gateway`; el token no se muestra nunca |
+| `ENVIRONMENT` | `development` | `development` o `production`; con `production` se aplican las reglas de compliance |
+| `API_KEYS` | vacía | `cliente:clave,...`; secreto; error con posición y largo, nunca el valor |
+| `RATE_LIMIT_PER_MINUTE` | `30` | Entero mayor que 0; por cliente |
+| `MODEL_PROVIDER` | `fake` | `fake` o `gateway`; en producción no puede ser `fake` |
+| `CF_ACCOUNT_ID`, `CF_GATEWAY_ID`, `CF_API_TOKEN` | vacía, `default`, vacía | Obligatorias con `gateway`; el token no se muestra nunca |
 | `MODEL_SMALL` | `@cf/meta/llama-3.1-8b-instruct-fast` | No vacío y con precio |
 | `MODEL_LARGE` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | No vacío y con precio |
 | `ROUTING` | `true` | `true` o `false` |
@@ -127,7 +146,8 @@ sequenceDiagram
 | `SERVICE_NAME` | `hr-assistant` | Texto no vacío |
 | `SLO_P95_MS` | `2000` | Entero mayor que 0 |
 | `LANGSMITH_TRACING` | `false` | `true` o `false`; sin `LANGSMITH_API_KEY` no se traza |
-| `HIDE_INPUTS` / `HIDE_OUTPUTS` | `true` | `true` o `false` |
+| `HIDE_INPUTS` / `HIDE_OUTPUTS` | `true` | `true` o `false`; en producción con trazas deben ser `true` |
+| `PORT` | `8000` | Lo pone Render; solo lo usa el `CMD` del contenedor |
 
-Los secretos (`CF_API_TOKEN`, `LANGSMITH_API_KEY`) nunca se escriben en el log ni en
-`.env.example`. Un valor inválido impide arrancar con un `ConfigError` claro.
+Los secretos (`API_KEYS`, `CF_API_TOKEN`, `LANGSMITH_API_KEY`) nunca se escriben en el log, en
+la traza, en un error, en `.env.example` ni en el repositorio: en Render van con `sync: false`.

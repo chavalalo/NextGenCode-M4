@@ -8,13 +8,14 @@
     ],
     "allow": [
       "Bash(uv run python -m verification *)",
-      "Bash(uv run python scripts/pipeline.py)"
+      "Bash(uv run python scripts/pipeline.py)",
+      "Bash(uv run python scripts/publish.py *)"
     ]
   },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Bash",
         "hooks": [
           {
             "type": "command",

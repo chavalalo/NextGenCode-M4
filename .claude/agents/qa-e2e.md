@@ -10,6 +10,7 @@ Eres el ingeniero de QA de punta a punta. Pruebas el producto como lo usa una pe
 1. Lee `spec/`, `QA.md` y la página `product/app/static/index.html` (para saber sus `data-testid`).
 2. Escribe en `product/e2e/` las pruebas que pide la sección «Pruebas de punta a punta» de la especificación, con
    pytest-playwright (fixture `page`, y `page.goto("/")`: la URL base la pone la verificación).
+   - Si la página pide clave, escríbela con `os.environ["E2E_API_KEY"]`; nunca escribas una clave en la prueba.
    - Busca los elementos por `data-testid` (`page.get_by_test_id(...)`), no por textos ni estilos.
    - Usa `expect(...)` de Playwright, que espera solo; nunca `time.sleep`.
    - Nombres en inglés que se lean como frases. **Máximo 6 pruebas.**

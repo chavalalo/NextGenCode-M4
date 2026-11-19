@@ -27,6 +27,37 @@ from app.main import create_app  # noqa: E402
 DATA_PATH = PRODUCT / "data" / "employees.json"
 START = datetime(2026, 1, 15, 10, 30, tzinfo=timezone.utc)
 
+# Clave de prueba (16+ caracteres): no es un secreto real.
+TEST_CLIENT = "tester"
+TEST_API_KEY = "tester-key-0123456789"
+API_KEY_HEADER = "X-API-Key"
+
+
+def with_test_key(environ):
+    """Agrega ``API_KEYS`` con el cliente de prueba si la prueba no lo da.
+
+    Así las pruebas de las sesiones 1 a 3 siguen pasando sin tocar sus pasos.
+
+    :param environ: Variables de entorno de la prueba o ``None``
+    :type environ: dict or None
+    :return: Copia de las variables con ``API_KEYS``
+    :rtype: dict
+    """
+    values = dict(environ or {})
+    values.setdefault("API_KEYS", f"{TEST_CLIENT}:{TEST_API_KEY}")
+    return values
+
+
+def keyed_client(app, **kwargs):
+    """Cliente HTTP que manda la clave de prueba en cada petición.
+
+    :param app: Aplicación FastAPI
+    :type app: fastapi.FastAPI
+    :return: Cliente con ``X-API-Key`` por omisión
+    :rtype: fastapi.testclient.TestClient
+    """
+    return TestClient(app, headers={API_KEY_HEADER: TEST_API_KEY}, **kwargs)
+
 
 @pytest.fixture
 def directory():
@@ -49,10 +80,10 @@ def make_client(directory):
     """
 
     def _make(environ=None, model=None):
-        settings = Settings.from_env(environ or {})
+        settings = Settings.from_env(with_test_key(environ))
         chosen = model or FakeModel(directory.departments())
         app = create_app(settings=settings, model=chosen, directory=directory)
-        return TestClient(app)
+        return keyed_client(app)
 
     return _make
 
@@ -101,7 +132,7 @@ def make_observed_client(directory, clock, log_stream):
     from app.tracing import NoopTracer  # pylint: disable=import-outside-toplevel
 
     def _make(environ=None, model=None):
-        settings = Settings.from_env(environ or {})
+        settings = Settings.from_env(with_test_key(environ))
         chosen = model or FakeModel(directory.departments())
         app = create_app(
             settings=settings,
@@ -111,7 +142,7 @@ def make_observed_client(directory, clock, log_stream):
             log_stream=log_stream,
             tracer=NoopTracer(),
         )
-        return TestClient(app, raise_server_exceptions=False)
+        return keyed_client(app, raise_server_exceptions=False)
 
     return _make
 
@@ -150,7 +181,7 @@ def make_cost_client(directory, clock, log_stream):
     from app.tracing import NoopTracer  # pylint: disable=import-outside-toplevel
 
     def _make(environ=None, models=None, http_client=None):
-        settings = Settings.from_env(environ or {})
+        settings = Settings.from_env(with_test_key(environ))
         app = create_app(
             settings=settings,
             directory=directory,
@@ -160,7 +191,7 @@ def make_cost_client(directory, clock, log_stream):
             log_stream=log_stream,
             tracer=NoopTracer(),
         )
-        return TestClient(app, raise_server_exceptions=False)
+        return keyed_client(app, raise_server_exceptions=False)
 
     return _make
 

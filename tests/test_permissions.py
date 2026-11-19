@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from hooks import permissions
 from hooks.permissions import ROOT, check
 
 
@@ -17,6 +18,8 @@ def write(agent, path, tool="Write"):
     "agent, path",
     [
         ("architect", "output/plan.md"),
+        ("deploy", "product/.github/workflows/ci.yml"),
+        ("security", "product/doc/compliance-checklist.md"),
         ("architect", "product/doc/adr/0001-stateless-api.md"),
         ("qa-unit", "product/tests/test_agent.py"),
         ("developer", "product/app/main.py"),
@@ -61,3 +64,41 @@ def test_hook_exit_code_tells_claude_code_what_to_do(agent, code):
         check=False,
     )
     assert hook.returncode == code
+
+
+def test_architect_cannot_approve_its_own_publication():
+    assert check(write("architect", "output/approved.txt")) is not None
+
+
+@pytest.mark.parametrize(
+    "tool, tool_input",
+    [
+        ("Read", {"file_path": "product/.env"}),
+        ("Bash", {"command": "uv run --env-file .env uvicorn app.main:app"}),
+        ("Grep", {"pattern": "TOKEN", "path": ".env"}),
+    ],
+)
+def test_nobody_reads_env_files(tool, tool_input):
+    event = {"tool_name": tool, "tool_input": tool_input}
+    assert check(event) == "Nadie lee .env: ahí van los secretos."
+
+
+def test_env_example_and_writing_dockerignore_are_fine():
+    example = {"tool_name": "Read", "tool_input": {"file_path": ".env.example"}}
+    assert check(example) is None
+    dockerignore = write("deploy", "product/.dockerignore")
+    dockerignore["tool_input"]["content"] = ".env\n"
+    assert check(dockerignore) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["uv run python scripts/publish.py hr-assistant", "git push", "gh repo create x"],
+)
+def test_publishing_needs_human_approval(command, tmp_path, monkeypatch):
+    monkeypatch.setattr(permissions, "ROOT", tmp_path)
+    event = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert check(event).startswith("Publicar requiere")
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "approved.txt").write_text("ok", encoding="utf-8")
+    assert check(event) is None

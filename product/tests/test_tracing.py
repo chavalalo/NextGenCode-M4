@@ -97,3 +97,19 @@ def test_langsmith_tracer_hides_text_and_tags_the_request_id(monkeypatch):
         (kwargs.get("metadata") or {}).get("request_id") == "demo-123"
         for kwargs in calls.contexts
     )
+
+
+def test_the_trace_metadata_names_the_client_but_never_a_key(monkeypatch):
+    langsmith, calls = fake_langsmith()
+    monkeypatch.setitem(sys.modules, "langsmith", langsmith)
+
+    tracer = build_tracer(Settings.from_env(TRACING_ON))
+    with tracer.context("demo-123", client="tester"):
+        pass
+    with NoopTracer().context("demo-123", client="tester"):
+        pass
+
+    assert calls.contexts[-1]["metadata"] == {
+        "request_id": "demo-123",
+        "client": "tester",
+    }

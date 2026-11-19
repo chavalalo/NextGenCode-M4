@@ -4,7 +4,8 @@
 ``app`` es la instancia que arranca uvicorn con la configuración del entorno.
 
 Cada petición lleva un id (``X-Request-ID``), deja una línea JSON en el log y
-se cuenta en las métricas del proceso.
+se cuenta en las métricas del proceso. ``POST /ask`` y ``GET /metrics`` piden
+la clave del cliente en ``X-API-Key`` y respetan su límite por minuto.
 """
 
 import os
@@ -14,12 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.agent import Agent
+from app.auth import identify_client
 from app.clock import SystemClock
+from app.compliance import enforce
 from app.config import Settings
 from app.costs import PriceTable
 from app.directory import EmployeeDirectory
@@ -28,10 +31,17 @@ from app.levers import choose_model, trim_history
 from app.llm import build_models
 from app.logs import JsonLogger
 from app.metrics import Metrics
+from app.ratelimit import RateLimiter
 from app.tracing import build_tracer
 
 INDEX_PATH = Path(__file__).resolve().parent / "static" / "index.html"
 REQUEST_ID_HEADER = "X-Request-ID"
+API_KEY_HEADER = "X-API-Key"
+RETRY_AFTER_HEADER = "Retry-After"
+UNAUTHORIZED_STATUS = 401
+UNAUTHORIZED_DETAIL = "invalid or missing API key"
+RATE_LIMITED_STATUS = 429
+RATE_LIMITED_DETAIL = "rate limit exceeded"
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
 AUDIT_ARG_MAX_CHARS = 200
 INTERNAL_ERROR_STATUS = 500
@@ -112,6 +122,8 @@ class _Runtime:  # pylint: disable=too-many-instance-attributes
     :type ask_request: type
     :param index_html: Página web
     :type index_html: str
+    :param limiter: Límite de peticiones por cliente
+    :type limiter: app.ratelimit.RateLimiter
     """
 
     settings: Settings
@@ -123,6 +135,7 @@ class _Runtime:  # pylint: disable=too-many-instance-attributes
     metrics: Metrics
     ask_request: type
     index_html: str
+    limiter: RateLimiter
 
 
 def _build_ask_request(max_question_chars):
@@ -209,14 +222,15 @@ def _log_agent_run(logger, request_id, payload, result, usage):
     :type payload: pydantic.BaseModel
     :param result: Resultado del agente
     :type result: app.agent.AgentResult
-    :param usage: ``model``, ``route``, ``history_sent``, ``cached_calls`` y
-        ``cost_usd`` de la corrida
+    :param usage: ``client``, ``model``, ``route``, ``history_sent``,
+        ``cached_calls`` y ``cost_usd`` de la corrida
     :type usage: dict
     """
     for call in result.tool_calls:
         logger.emit(
             "audit",
             request_id,
+            client=usage["client"],
             action="tool_call",
             tool=call["tool"],
             args=_audit_args(call["args"]),
@@ -235,13 +249,15 @@ def _log_agent_run(logger, request_id, payload, result, usage):
     )
 
 
-def _answer(runtime, request_id, payload):
+def _answer(runtime, request_id, client, payload):
     """Enruta, recorta el historial, corre el agente y calcula el costo.
 
     :param runtime: Dependencias ya construidas
     :type runtime: _Runtime
     :param request_id: Id de la petición
     :type request_id: str
+    :param client: Nombre del cliente que pregunta
+    :type client: str
     :param payload: Cuerpo de la petición
     :type payload: pydantic.BaseModel
     :return: Respuesta de ``POST /ask``
@@ -255,10 +271,11 @@ def _answer(runtime, request_id, payload):
         settings.history_window,
     )
     messages = history + [{"role": "user", "content": payload.question}]
-    with runtime.tracer.context(request_id):
+    with runtime.tracer.context(request_id, client=client):
         result = runtime.agent.run(messages, model=runtime.models[route.model])
     cost_usd = runtime.prices.cost(route.model, result.completions)
     usage = {
+        "client": client,
         "model": route.model,
         "route": route.reason,
         "history_sent": len(history),
@@ -314,6 +331,7 @@ def _install_observability(application, clock, logger, metrics):
         logger.emit(
             "request",
             request_id,
+            client=getattr(request.state, "client", None),
             method=request.method,
             path=request.url.path,
             status=response.status_code,
@@ -324,8 +342,59 @@ def _install_observability(application, clock, logger, metrics):
         return response
 
 
+def _client_dependency(runtime):
+    """Crea la dependencia que exige la clave y aplica el límite.
+
+    Primero la clave (401) y después el límite (429). En el log solo va el
+    nombre del cliente o el motivo del rechazo: nunca la clave.
+
+    :param runtime: Dependencias ya construidas
+    :type runtime: _Runtime
+    :return: Dependencia de FastAPI que devuelve el nombre del cliente
+    :rtype: callable
+    """
+
+    def require_client(request: Request):
+        """Identifica al cliente por ``X-API-Key`` y revisa su límite.
+
+        :param request: Petición en curso
+        :type request: fastapi.Request
+        :return: Nombre del cliente
+        :rtype: str
+        :raises fastapi.HTTPException: 401 sin clave válida; 429 sobre el límite
+        """
+        request_id = request.state.request_id
+        header_value = request.headers.get(API_KEY_HEADER)
+        client = identify_client(header_value, runtime.settings.api_clients)
+        if client is None:
+            reason = "invalid" if header_value else "missing"
+            runtime.logger.emit("auth_rejected", request_id, reason=reason)
+            raise HTTPException(
+                status_code=UNAUTHORIZED_STATUS, detail=UNAUTHORIZED_DETAIL
+            )
+        request.state.client = client
+        decision = runtime.limiter.check(client)
+        if not decision.allowed:
+            runtime.logger.emit(
+                "rate_limited",
+                request_id,
+                client=client,
+                retry_after=decision.retry_after,
+            )
+            raise HTTPException(
+                status_code=RATE_LIMITED_STATUS,
+                detail=RATE_LIMITED_DETAIL,
+                headers={RETRY_AFTER_HEADER: str(decision.retry_after)},
+            )
+        return client
+
+    return require_client
+
+
 def _add_routes(application, runtime):
     """Registra las rutas de la API.
+
+    ``/`` y ``/health`` son públicas; ``/ask`` y ``/metrics`` piden clave.
 
     :param application: Aplicación FastAPI
     :type application: fastapi.FastAPI
@@ -333,6 +402,7 @@ def _add_routes(application, runtime):
     :type runtime: _Runtime
     """
     ask_request = runtime.ask_request
+    require_client = _client_dependency(runtime)
 
     @application.get("/", response_class=HTMLResponse)
     def home():
@@ -344,7 +414,7 @@ def _add_routes(application, runtime):
         """Informa que el proceso está vivo y su id."""
         return {"status": "ok", "pid": os.getpid()}
 
-    @application.get("/metrics")
+    @application.get("/metrics", dependencies=[Depends(require_client)])
     def metrics():
         """Devuelve las métricas de este proceso con el costo acumulado."""
         snapshot = runtime.metrics.snapshot(os.getpid())
@@ -352,11 +422,15 @@ def _add_routes(application, runtime):
         return snapshot
 
     @application.post("/ask", response_model=AskResponse)
-    def ask(payload: ask_request, request: Request):
+    def ask(
+        payload: ask_request,
+        request: Request,
+        client: str = Depends(require_client),
+    ):
         """Responde una pregunta; el historial lo manda el cliente."""
         request_id = request.state.request_id
         try:
-            return _answer(runtime, request_id, payload)
+            return _answer(runtime, request_id, client, payload)
         except ModelUnavailable as error:
             # Solo el tipo: nunca la URL (con la cuenta) ni el token.
             runtime.logger.emit("error", request_id, error_type=type(error).__name__)
@@ -426,8 +500,10 @@ def create_app(
     :return: Aplicación lista para servir
     :rtype: fastapi.FastAPI
     :raises app.config.ConfigError: Si la configuración del entorno es inválida
+        o, con ``ENVIRONMENT=production``, incumple una regla de compliance
     """
     settings = settings or Settings.from_env(os.environ)
+    enforce(settings)
     directory = directory or EmployeeDirectory(settings.employees_path)
     models = _resolve_models(
         settings,
@@ -452,6 +528,7 @@ def create_app(
         metrics=Metrics(settings.slo_p95_ms),
         ask_request=_build_ask_request(settings.max_question_chars),
         index_html=INDEX_PATH.read_text(encoding="utf-8"),
+        limiter=RateLimiter(settings.rate_limit_per_minute, clock),
     )
 
     application = FastAPI(title="HR Assistant")

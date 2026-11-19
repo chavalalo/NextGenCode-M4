@@ -26,11 +26,13 @@ class NoopTracer:
         return fn
 
     @contextlib.contextmanager
-    def context(self, request_id):
+    def context(self, request_id, client=None):  # pylint: disable=unused-argument
         """Contexto vacío para una petición.
 
         :param request_id: Id de la petición
         :type request_id: str
+        :param client: Nombre del cliente (nunca su clave)
+        :type client: str or None
         :return: Generador del contexto
         :rtype: typing.Iterator[str]
         """
@@ -73,16 +75,18 @@ class LangSmithTracer:
         return decorator(fn)
 
     @contextlib.contextmanager
-    def context(self, request_id):
-        """Pone el ``request_id`` en los metadatos de las trazas internas.
+    def context(self, request_id, client=None):
+        """Pone el ``request_id`` y el cliente en los metadatos de las trazas.
 
         :param request_id: Id de la petición
         :type request_id: str
+        :param client: Nombre del cliente (nunca su clave)
+        :type client: str or None
         :return: Generador del contexto
         :rtype: typing.Iterator[str]
         """
         with self._langsmith.tracing_context(
-            metadata={"request_id": request_id},
+            metadata={"request_id": request_id, "client": client},
             enabled=True,
             client=self._client,
         ):

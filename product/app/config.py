@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from app.auth import parse_api_keys
 from app.costs import PriceTable
+from app.errors import ConfigError
+
+__all__ = ["ConfigError", "Settings"]
 
 PRODUCT_DIR = Path(__file__).resolve().parents[1]
 SUPPORTED_PROVIDERS = ("fake", "gateway")
@@ -35,10 +39,9 @@ DEFAULT_MODEL_TEMPERATURE = "0"
 DEFAULT_CACHE_TTL_SECONDS = "0"
 DEFAULT_PRICES_PATH = "data/model_prices.json"
 BOOLEAN_VALUES = {"true": True, "false": False}
-
-
-class ConfigError(ValueError):
-    """Error de configuración: algún valor de entorno no es válido."""
+SUPPORTED_ENVIRONMENTS = ("development", "production")
+DEFAULT_ENVIRONMENT = "development"
+DEFAULT_RATE_LIMIT_PER_MINUTE = "30"
 
 
 def _positive_int(environ, name, default):
@@ -183,6 +186,53 @@ def _tracing_enabled(environ):
     requested = _boolean(environ, "LANGSMITH_TRACING", DEFAULT_LANGSMITH_TRACING)
     has_key = bool(str(environ.get("LANGSMITH_API_KEY", "")).strip())
     return requested and has_key
+
+
+def _environment(environ):
+    """Lee el entorno de despliegue.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :return: ``development`` o ``production``
+    :rtype: str
+    :raises ConfigError: Si el valor no es uno de los entornos conocidos
+    """
+    raw = environ.get("ENVIRONMENT", DEFAULT_ENVIRONMENT)
+    value = str(raw).strip().lower()
+    if value not in SUPPORTED_ENVIRONMENTS:
+        raise ConfigError(
+            f"ENVIRONMENT must be one of {SUPPORTED_ENVIRONMENTS}, got {raw!r}"
+        )
+    return value
+
+
+def _security_settings(environ):
+    """Lee el entorno, los clientes con su clave y el límite de peticiones.
+
+    Los errores de ``API_KEYS`` solo dicen la posición y el largo de la
+    entrada; ``from None`` evita que la traza arrastre otra excepción.
+
+    :param environ: Variables de entorno
+    :type environ: Mapping[str, str]
+    :return: Campos ``environment``, ``api_clients``,
+        ``rate_limit_per_minute`` y ``langsmith_tracing_requested``
+    :rtype: dict
+    :raises ConfigError: Si algún valor es inválido
+    """
+    try:
+        clients = parse_api_keys(environ.get("API_KEYS", ""))
+    except ConfigError as error:
+        raise ConfigError(str(error)) from None
+    return {
+        "environment": _environment(environ),
+        "api_clients": clients,
+        "rate_limit_per_minute": _positive_int(
+            environ, "RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE
+        ),
+        "langsmith_tracing_requested": _boolean(
+            environ, "LANGSMITH_TRACING", DEFAULT_LANGSMITH_TRACING
+        ),
+    }
 
 
 def _existing_file(environ, name, default):
@@ -339,6 +389,15 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     :type cache_ttl_seconds: int
     :param prices_path: Ruta absoluta al archivo de precios
     :type prices_path: pathlib.Path
+    :param environment: ``development`` o ``production``
+    :type environment: str
+    :param api_clients: Clientes con su clave (secreto: no sale en ``repr``)
+    :type api_clients: tuple[app.auth.ApiClient, ...]
+    :param rate_limit_per_minute: Peticiones por cliente por minuto
+    :type rate_limit_per_minute: int
+    :param langsmith_tracing_requested: ``LANGSMITH_TRACING`` vale ``true``,
+        haya o no clave de LangSmith
+    :type langsmith_tracing_requested: bool
     """
 
     model_provider: str
@@ -362,6 +421,10 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     model_temperature: float = float(DEFAULT_MODEL_TEMPERATURE)
     cache_ttl_seconds: int = int(DEFAULT_CACHE_TTL_SECONDS)
     prices_path: Path = PRODUCT_DIR / DEFAULT_PRICES_PATH
+    environment: str = DEFAULT_ENVIRONMENT
+    api_clients: tuple = field(default=(), repr=False)
+    rate_limit_per_minute: int = int(DEFAULT_RATE_LIMIT_PER_MINUTE)
+    langsmith_tracing_requested: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> "Settings":
@@ -395,4 +458,5 @@ class Settings:  # pylint: disable=too-many-instance-attributes
             tracing_enabled=_tracing_enabled(environ),
             **_cloudflare_settings(environ, provider),
             **_model_settings(environ),
+            **_security_settings(environ),
         )
